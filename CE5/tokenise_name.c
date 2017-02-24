@@ -255,10 +255,6 @@ static int encode_token_int4(name_context *ctx, int ntok,
     if (descriptor_grow(&desc[id+2], 1) < 0)	return -1;
     if (descriptor_grow(&desc[id+3], 1) < 0)	return -1;
 
-    if (id == (17<<4)+N_DIGITS) {
-	printf("%d %d %d %d\n", desc[id].buf_l, desc[id+1].buf_l, desc[id+2].buf_l, desc[id+3].buf_l);
-    }
-
     desc[id  ].buf[desc[id  ].buf_l++] = val>>0;
     desc[id+1].buf[desc[id+1].buf_l++] = val>>8;
     desc[id+2].buf[desc[id+2].buf_l++] = val>>16;
