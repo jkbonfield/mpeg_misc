@@ -63,6 +63,10 @@ cmix          194565  // took 6897.19 seconds!
 #include <errno.h>
 #include <time.h>
 
+#include "khash.h"
+KHASH_MAP_INIT_STR(s2i, int)
+KHASH_MAP_INIT_INT(i2s, char *)
+
 // FIXME
 #define MAX_TOKENS 64
 #define MAX_DESCRIPTORS (MAX_TOKENS<<4)
@@ -76,13 +80,18 @@ typedef struct {
     int last_token_int[MAX_TOKENS];  // decoded integer
     int last_token_str[MAX_TOKENS];  // offset into name
     int last_token_delta[MAX_TOKENS]; // boolean
+
+    // For finding entire line dups
+    khash_t(s2i) *name_s;
+    khash_t(i2s) *name_i;
+    int counter;
 } name_context;
 
-enum name_type {N_TYPE = 0, N_ALPHA, N_ALPHA_LEN, N_CHAR, N_ZERO,
-		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_d1, N_d2, N_d23, N_MATCH, N_END};
+enum name_type {N_TYPE = 0, N_ALPHA/*, N_ALPHA_LEN*/, N_CHAR, N_ZERO,
+		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_MATCH, N_DUP, N_END};
 
 char *types[]={"TYPE", "ALPHA", "CHAR", "ZERO",
-	       "DIGITS", "", "", "", "DDELTA", "", "", "", "MATCH", "END"};
+	       "DIGITS", "", "", "", "DDELTA", "MATCH", "DUP", "END"};
 
 typedef struct {
     uint8_t *buf;
@@ -246,6 +255,10 @@ static int encode_token_int4(name_context *ctx, int ntok,
     if (descriptor_grow(&desc[id+2], 1) < 0)	return -1;
     if (descriptor_grow(&desc[id+3], 1) < 0)	return -1;
 
+    if (id == (17<<4)+N_DIGITS) {
+	printf("%d %d %d %d\n", desc[id].buf_l, desc[id+1].buf_l, desc[id+2].buf_l, desc[id+3].buf_l);
+    }
+
     desc[id  ].buf[desc[id  ].buf_l++] = val>>0;
     desc[id+1].buf[desc[id+1].buf_l++] = val>>8;
     desc[id+2].buf[desc[id+2].buf_l++] = val>>16;
@@ -328,22 +341,22 @@ static int encode_token_alpha(name_context *ctx, int ntok,
     return 0;
 }
 
-// Strings using a separate length model
-static int encode_token_alpha_len(name_context *ctx, int ntok,
-				  char *str, int len) {
-    assert(len < 256); // FIXME
-    int id = (ntok<<4) | N_ALPHA;
-
-    if (encode_token_type(ctx, ntok, N_ALPHA) < 0)  return -1;
-    if (descriptor_grow(&desc[id],   len) < 0) return -1;
-    if (descriptor_grow(&desc[id+1], 1) < 0) return -1;
-    memcpy(&desc[id].buf[desc[id].buf_l], str, len);
-    desc[id].buf[desc[id].buf_l+len] = 0;
-    desc[id].buf_l += len;
-    desc[id+1].buf[desc[id+1].buf_l++] = len;
-
-    return 0;
-}
+//// Strings using a separate length model
+//static int encode_token_alpha_len(name_context *ctx, int ntok,
+//				  char *str, int len) {
+//    assert(len < 256); // FIXME
+//    int id = (ntok<<4) | N_ALPHA;
+//
+//    if (encode_token_type(ctx, ntok, N_ALPHA) < 0)  return -1;
+//    if (descriptor_grow(&desc[id],   len) < 0) return -1;
+//    if (descriptor_grow(&desc[id+1], 1) < 0) return -1;
+//    memcpy(&desc[id].buf[desc[id].buf_l], str, len);
+//    desc[id].buf[desc[id].buf_l+len] = 0;
+//    desc[id].buf_l += len;
+//    desc[id+1].buf[desc[id+1].buf_l++] = len;
+//
+//    return 0;
+//}
 //#define encode_token_alpha encode_token_alpha_len
 
 // FIXME: need limit on string length for security
@@ -382,6 +395,13 @@ static int decode_token_char(name_context *ctx, int ntok, char *str) {
     return 1;
 }
 
+
+// A duplicated name
+static int encode_token_dup(name_context *ctx, uint32_t val) {
+    return encode_token_int(ctx, 0, N_DUP, val);
+}
+
+
 //-----------------------------------------------------------------------------
 // Name encoder
 
@@ -397,9 +417,18 @@ static int decode_token_char(name_context *ctx, int ntok, char *str) {
  *        -1 on failure.
  */
 int encode_name(name_context *ctx, char *name, int len) {
-    int i, j, k;
+    int i, j, k, kret;
+    name[len]=0; // keep hash table happy, ugh.
+    khiter_t kh = kh_put(s2i, ctx->name_s, strdup(name), &kret);
 
-    //fprintf(stderr, "NAME: %.*s\n", len, name);
+    //fprintf(stderr, "NAME: %.*s, \tkh=%3d, kret=%d value=%4d\n", len, name, kh, kret, kret?-666:kh_value(ctx->name_s, kh));
+
+    if (kret == 0) {
+	int dist = ctx->counter - kh_value(ctx->name_s, kh);
+	return encode_token_dup(ctx, dist);
+    }
+
+    kh_value(ctx->name_s, kh) = ctx->counter++;
 
     int ntok = 0;
     for (i = j = 0, k = 0; i < len; i++, j++, k++) {
@@ -498,19 +527,20 @@ int encode_name(name_context *ctx, char *name, int len) {
 		if (d == 0 /* && !ctx->last_token_delta[ntok]*/) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		    ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[ntok] = 0;
 		} else if (d < 256 && d >= 0) {
 		    //fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[ntok], v);
 		    if (encode_token_int1(ctx, ntok, N_DDELTA, d) < 0) return -1;
-		    ctx->last_token_delta[ntok] = 1;
+		    //ctx->last_token_delta[ntok] = 1;
 		} else {
 		    //fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[ntok], v);
 		    if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		    ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[ntok] = 0;
 		}
 	    } else {
 		//fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
 		if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
+		//ctx->last_token_delta[ntok] = 0;
 	    }
 
 	    ctx->last_token_int[ntok] = v;
@@ -558,6 +588,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 // FIXME: should know the maximum name length for safety.
 int decode_name(name_context *ctx, char *name) {
     int ntok, len = 0, len2;
+    khiter_t kh;
 
     *name = 0;
 
@@ -566,6 +597,16 @@ int decode_name(name_context *ctx, char *name) {
 	enum name_type tok;
 	tok = decode_token_type(ctx, ntok);
 	//printf("token type %s / %s, %d\n", types[tok], types[ctx->last_token_type[ntok]], ctx->last_token_int[ntok]);
+
+	if (ntok == 0 && tok == N_DUP) {
+	    // Duplicate
+	    decode_token_int(ctx, 0, N_DUP, &v);
+	    kh = kh_get(i2s, ctx->name_i, ctx->counter - v);
+	    assert(kh != kh_end(ctx->name_i));
+	    strcpy(name, kh_value(ctx->name_i, kh));
+	    return strlen(name);
+	    //return sprintf(name, "Xdup of %d => '%s'" ,ctx->counter - v, kh_value(ctx->name_i, kh));
+	}
 
 	switch (tok) {
 	case N_CHAR:
@@ -638,7 +679,11 @@ int decode_name(name_context *ctx, char *name) {
 	    ctx->last_token_type[ntok] = N_END;
 	    // FIXME: avoid using memcpy, just keep pointer into buffer?
 	    memcpy(ctx->last_name, name, len);
-
+	    
+	    int ret;
+	    kh = kh_put(i2s, ctx->name_i, ctx->counter++, &ret);
+	    kh_value(ctx->name_i, kh) = strdup(name);
+	    
 	    return len;
 
 	default:
@@ -684,12 +729,11 @@ static int decode(int argc, char **argv) {
     int ret;
     name_context ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.name_i = kh_init(i2s);
 
-    while ((ret = decode_name(&ctx, line)) > 0) {
+    while ((ret = decode_name(&ctx, line)) > 0)
 	puts(line);
-	// debug
-	memset(line, 0, 100);
-    }
+
     if (ret < 0)
 	return -1;
 
@@ -702,7 +746,7 @@ static int encode(int argc, char **argv) {
     name_context ctx;
 
     memset(&ctx, 0, sizeof(ctx));
-
+    ctx.name_s = kh_init(s2i);
 
     if (argc > 1) {
 	fp = fopen(argv[1], "r");
@@ -748,6 +792,12 @@ static int encode(int argc, char **argv) {
 	}
     }
 
+    // purge hash table
+    khiter_t k;
+    for (k = kh_begin(ctx.name_s); k != kh_end(ctx.name_s); ++k)
+	if (kh_exist(ctx.name_s, k))
+	    free((char*)kh_key(ctx.name_s, k));
+    
     return 0;
 }
 
