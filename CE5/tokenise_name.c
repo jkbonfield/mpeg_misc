@@ -486,10 +486,10 @@ int encode_name(name_context *ctx, char *name, int len) {
 
 	    i = s-1;
 	} else if (isdigit(name[i])) {
-	    int s = i;
+	    uint32_t s = i;
 	    uint32_t v = 0;
 	    int d = 0;
-	    while (s < len && isdigit(name[s]) && v < (1<<27)) {
+	    while (s < len && isdigit(name[s]) && s-i < 9) {
 		v = v*10 + name[s] - '0';
 		s++;
 	    }
