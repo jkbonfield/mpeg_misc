@@ -10,6 +10,7 @@ for f in $in.[0-9]*
 do
     base=$(echo $f | sed 's:.*/::')
 
+    cat=$(cat $f | wc -c)
     r0=$($rans -o0 $f 2>/dev/null | wc -c)
     r1=$($rans -o1 $f 2>/dev/null | wc -c)
     r0R=$($rle < $f | $rans -o0 2>/dev/null | wc -c)
@@ -20,6 +21,7 @@ do
     
     min=99999999
     
+    if [ $cat -lt $min ]; then min=$cat; method=cat; fi
     if [ $r0  -lt $min ]; then min=$r0;  method=r0;  fi
     if [ $r1  -lt $min ]; then min=$r1;  method=r1;  fi
     if [ $r0R -lt $min ]; then min=$r0R; method=r0R; fi
@@ -31,6 +33,7 @@ do
     #echo $method $min $r0,$r1,$r0R,$r1R,$gz,$bz,$xz $f,$base
     
     case $method in
+    cat) cat $f > $out/$f.cat;;
     r0)  $rans -o0 < $f > $out/$base.r0 2>/dev/null;;
     r1)  $rans -o1 < $f > $out/$base.r1 2>/dev/null;;
     r0R) $rle < $f | $rans -o0 > $out/$base.r0R 2>/dev/null;;
@@ -42,5 +45,4 @@ do
     esac
 done
 
-cat $out/* | wc -c
-
+expr `/bin/ls -1 $out/*|wc -l` \* 2 + `cat $out/* | wc -c`
