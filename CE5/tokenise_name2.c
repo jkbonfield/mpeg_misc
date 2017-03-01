@@ -677,7 +677,13 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    if (i+1 < len && !isdigit(name[i+1])) {
 		//putchar(' ');putchar('+');
 		ntok++;
-		if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
+		if (ntok < ctx->last_ntok[pnum] &&
+		    ctx->last_token_type[pnum][ntok] == N_ZERO &&
+		    ctx->last_token_int [pnum][ntok] == 0) {
+		    if (encode_token_match(ctx, ntok) < 0) return -1;
+		} else {
+		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
+		}
 		ctx->last_token_int[cnum][ntok] = 0;
 		ctx->last_token_type[cnum][ntok] = N_ZERO;
 	    }
@@ -688,7 +694,14 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    int d = 0;
 	    if (ntok && ctx->last_token_type[cnum][ntok-1] != N_ZERO) {
 		//putchar('*');putchar(' ');
-		if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
+
+		if (ntok < ctx->last_ntok[pnum] &&
+		    ctx->last_token_type[pnum][ntok] == N_ZERO &&
+		    ctx->last_token_int [pnum][ntok] == 0) {
+		    if (encode_token_match(ctx, ntok) < 0) return -1;
+		} else {
+		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
+		}
 		ctx->last_token_int[cnum][ntok] = 0;
 		ctx->last_token_type[cnum][ntok] = N_ZERO;
 		ntok++;
@@ -700,27 +713,6 @@ int encode_name(name_context *ctx, char *name, int len) {
 		s++;
 	    }
 	    
-//	    // If we previously emitted a zero token at this point, then possibly
-//	    // we have a fixed sized numeric field that sometimes has leading zeros
-//	    // and sometimes not.  In this case we emit an N_ZERO token of 0 length
-//	    // to ensure token count is constant and keep remaining tokens in frame.
-//	    // Ie  :090: :111: will be CHAR ZERO DIG CHAR in all cases.
-//	    //
-//	    // However we only do this when the previous ZERO does indeed precede
-//	    // a DIGIT as with :0: :1: :2: the :0: *is* the number and isn't actually
-//	    // a leading zero.
-//	    if (ntok+1 < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ZERO &&
-//		ctx->last_token_type[pnum][ntok+1] == N_DIGITS) {
-//		if (ctx->last_token_int[pnum][ntok] == 0) {
-//		    if (encode_token_match(ctx, ntok) < 0) return -1;
-//		} else {
-//		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
-//		}
-//		ctx->last_token_int[cnum][ntok] = 0;
-//		ntok++;
-//	    }
-//
-
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
 	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
