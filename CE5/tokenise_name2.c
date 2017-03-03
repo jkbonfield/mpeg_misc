@@ -1,19 +1,3 @@
-/*
-100,000 names from ~/scratch/data/SRR608881.fastq.gz
-
-raw:         4712441
-fqzcomp -n1:  218738
-fqzcomp -n2:  235817
-this raw:    3390476
-this | gzip:  217578
-this | bzip2: 212000
-this | rans0: 238074  // r4x16b, 246890 with r32x16b
-mix of above: 199355  // min gzip, bzip2 & rans0 per desc.
-this | rans*: 201734  // best of rans0 or rans1 per desc.
-cmix          194565  // took 6897.19 seconds!
-
-*/
-
 // TODO
 //
 // - Is it better when encoding 1, 2, 3, 3, 4, 5, 5, 6, 7, 9, 9, 10 to encode
@@ -83,11 +67,11 @@ KHASH_MAP_INIT_INT(i2s, char *)
 // Number of names per block
 #define MAX_NAMES 100000
 
-enum name_type {N_ERR = -1, N_TYPE = 0, N_ALPHA/*, N_ALPHA_LEN*/, N_CHAR, N_ZERO, N_DUP, 
-		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_MATCH, N_DIFF, N_END};
+enum name_type {N_ERR = -1, N_TYPE = 0, N_ALPHA, N_CHAR, N_DZLEN, N_DIGITS0, N_Z1, N_DUP, N_DIFF, 
+		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_DDELTA0, N_MATCH, N_END};
 
-char *types[]={"TYPE", "ALPHA", "CHAR", "ZERO", "DUP",
-	       "DIGITS", "", "", "", "DDELTA", "MATCH", "DIFF", "END"};
+char *types[]={"TYPE", "ALPHA", "CHAR", "DZLEN", "DIG0", "DUP", "DIFF",
+	       "DIGITS", "", "", "", "DDELTA", "DDELTA0", "MATCH", "END"};
 
 typedef struct {
     char *last_name[MAX_NAMES];
@@ -115,6 +99,22 @@ static descriptor desc[MAX_DESCRIPTORS];
 //-----------------------------------------------------------------------------
 // Fast unsigned integer printing code.
 // Returns number of bytes written.
+static int append_uint32_fixed(char *cp, uint32_t i, uint8_t l) {
+    switch (l) {
+    case 9:*cp++ = i / 100000000 + '0', i %= 100000000;
+    case 8:*cp++ = i / 10000000  + '0', i %= 10000000;
+    case 7:*cp++ = i / 1000000   + '0', i %= 1000000;
+    case 6:*cp++ = i / 100000    + '0', i %= 100000;
+    case 5:*cp++ = i / 10000     + '0', i %= 10000;
+    case 4:*cp++ = i / 1000      + '0', i %= 1000;
+    case 3:*cp++ = i / 100       + '0', i %= 100;
+    case 2:*cp++ = i / 10        + '0', i %= 10;
+    case 1:*cp++ = i             + '0';
+    case 0:break;
+    }
+    return l;
+}
+
 static int append_uint32(char *cp, uint32_t i) {
     char *op = cp;
     uint32_t j;
@@ -152,7 +152,6 @@ static int append_uint32(char *cp, uint32_t i) {
 
     return cp-op;
 }
-
 
 //-----------------------------------------------------------------------------
 // Example descriptor encoding and IO.
@@ -238,6 +237,17 @@ static int encode_token_int1(name_context *ctx, int ntok,
     int id = (ntok<<4) | type;
 
     if (encode_token_type(ctx, ntok, type) < 0) return -1;
+    if (descriptor_grow(&desc[id], 1) < 0)	return -1;
+
+    desc[id].buf[desc[id].buf_l++] = val;
+
+    return 0;
+}
+
+static int encode_token_int1_(name_context *ctx, int ntok,
+			      enum name_type type, uint32_t val) {
+    int id = (ntok<<4) | type;
+
     if (descriptor_grow(&desc[id], 1) < 0)	return -1;
 
     desc[id].buf[desc[id].buf_l++] = val;
@@ -622,7 +632,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 
     int ntok = 1;
     i = 0;
-#define IT_LEN 8
+#define IT_LEN 7
     if (is_iontorrent) {
 	if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
 	    if (ctx->last_token_int[pnum][ntok] == IT_LEN && memcmp(name, ctx->last_name[pnum], IT_LEN) == 0) {
@@ -678,62 +688,53 @@ int encode_name(name_context *ctx, char *name, int len) {
 
 	    i = s-1;
 	} else if (name[i] == '0') {
-	    int s = i, v;
-	    while (s < len && name[s] == '0' && s-i < 255)
-		//putchar(name[s]),
-		s++;
-	    v = s-i;
-
-	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ZERO) {
-		if (ctx->last_token_int[pnum][ntok] == v) {
-		    //fprintf(stderr, "Tok %d (zero-mat, len %d)\n", N_MATCH, v);
-		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		} else {
-		    //fprintf(stderr, "Tok %d (zero, len %d / %d)\n", N_ZERO, ctx->last_token_int[pnum][ntok], v);
-		    if (encode_token_int1(ctx, ntok, N_ZERO, v) < 0) return -1;
-		}
-	    } else {
-		//fprintf(stderr, "Tok %d (new zero, len %d)\n", N_ZERO, v);
-		if (encode_token_int1(ctx, ntok, N_ZERO, v) < 0) return -1;
-	    }
-
-	    ctx->last_token_int[cnum][ntok] = v;
-	    ctx->last_token_type[cnum][ntok] = N_ZERO;
-
-	    i = s-1;
-
-	    if (i+1 < len && !isdigit(name[i+1])) {
-		//putchar(' ');putchar('+');
-		ntok++;
-		if (ntok < ctx->last_ntok[pnum] &&
-		    ctx->last_token_type[pnum][ntok] == N_ZERO &&
-		    ctx->last_token_int [pnum][ntok] == 0) {
-		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		} else {
-		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
-		}
-		ctx->last_token_int[cnum][ntok] = 0;
-		ctx->last_token_type[cnum][ntok] = N_ZERO;
-	    }
-
-	} else if (isdigit(name[i])) {
+	    // Digits starting with zero; encode length + value
 	    uint32_t s = i;
 	    uint32_t v = 0;
 	    int d = 0;
-	    if (ntok && ctx->last_token_type[cnum][ntok-1] != N_ZERO) {
-		//putchar('*');putchar(' ');
 
-		if (ntok < ctx->last_ntok[pnum] &&
-		    ctx->last_token_type[pnum][ntok] == N_ZERO &&
-		    ctx->last_token_int [pnum][ntok] == 0) {
-		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		} else {
-		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
-		}
-		ctx->last_token_int[cnum][ntok] = 0;
-		ctx->last_token_type[cnum][ntok] = N_ZERO;
-		ntok++;
+	    while (s < len && isdigit(name[s]) && s-i < 8) {
+		v = v*10 + name[s] - '0';
+		//putchar(name[s]);
+		s++;
 	    }
+	    
+	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
+	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
+	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS0) {
+		d = v - ctx->last_token_int[pnum][ntok];
+		if (d == 0 && ctx->last_token_str[pnum][ntok] == s-i) {
+		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
+		    if (encode_token_match(ctx, ntok) < 0) return -1;
+		    //ctx->last_token_delta[pnum][ntok]=0;
+		} else if (d < 256 && d >= 0 && ctx->last_token_str[pnum][ntok] == s-i) {
+		    //fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[pnum][ntok], v);
+		    //if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		    if (encode_token_int1(ctx, ntok, N_DDELTA0, d) < 0) return -1;
+		    //ctx->last_token_delta[pnum][ntok]=1;
+		} else {
+		    //fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[pnum][ntok], v);
+		    if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		    if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
+		    //ctx->last_token_delta[pnum][ntok]=0;
+		}
+	    } else {
+		//fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
+		if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
+		//ctx->last_token_delta[pnum][ntok]=0;
+	    }
+
+	    ctx->last_token_str[cnum][ntok] = s-i; // length
+	    ctx->last_token_int[cnum][ntok] = v;
+	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
+
+	    i = s-1;
+	} else if (isdigit(name[i])) {
+	    // digits starting 1-9; encode value
+	    uint32_t s = i;
+	    uint32_t v = 0;
+	    int d = 0;
 
 	    while (s < len && isdigit(name[s]) && s-i < 8) {
 		v = v*10 + name[s] - '0';
@@ -745,8 +746,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
 	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
 		d = v - ctx->last_token_int[pnum][ntok];
-		ctx->last_token_str[pnum][ntok]++;
-		if (d == 0 /* && !ctx->last_token_delta[pnum][ntok]*/) {
+		if (d == 0) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
 		    //ctx->last_token_delta[pnum][ntok]=0;
@@ -838,7 +838,7 @@ int decode_name(name_context *ctx, char *name) {
     int ntok, len = 0, len2;
 
     for (ntok = 1; ntok < MAX_TOKENS; ntok++) {
-	uint32_t v;
+	uint32_t v, vl;
 	enum name_type tok;
 	tok = decode_token_type(ctx, ntok);
 	//printf("Tok %d = %d\n", ntok, tok);
@@ -858,7 +858,25 @@ int decode_name(name_context *ctx, char *name) {
 	    len += len2;
 	    break;
 
-	case N_DIGITS:
+	case N_DIGITS0: // [0-9]*
+	    decode_token_int1(ctx, ntok, N_DZLEN, &vl);
+	    decode_token_int(ctx, ntok, N_DIGITS0, &v);
+	    len += append_uint32_fixed(&name[len], v, vl);
+	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
+	    ctx->last_token_int [cnum][ntok] = v;
+	    ctx->last_token_str [cnum][ntok] = vl;
+	    break;
+
+	case N_DDELTA0:
+	    decode_token_int1(ctx, ntok, N_DDELTA0, &v);
+	    v += ctx->last_token_int[pnum][ntok];
+	    len += append_uint32_fixed(&name[len], v, ctx->last_token_str[pnum][ntok]);
+	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
+	    ctx->last_token_int [cnum][ntok] = v;
+	    ctx->last_token_str [cnum][ntok] = ctx->last_token_str[pnum][ntok];
+	    break;
+
+	case N_DIGITS: // [1-9][0-9]*
 	    decode_token_int(ctx, ntok, N_DIGITS, &v);
 	    len += append_uint32(&name[len], v);
 	    ctx->last_token_type[cnum][ntok] = N_DIGITS;
@@ -871,14 +889,6 @@ int decode_name(name_context *ctx, char *name) {
 	    len += append_uint32(&name[len], v);
 	    ctx->last_token_type[cnum][ntok] = N_DIGITS;
 	    ctx->last_token_int [cnum][ntok] = v;
-	    break;
-
-	case N_ZERO:
-	    decode_token_int1(ctx, ntok, N_ZERO, &v);
-	    ctx->last_token_type[cnum][ntok] = N_ZERO;
-	    ctx->last_token_int [cnum][ntok] = v;
-	    while (v--)
-		name[len++] = '0';
 	    break;
 
 	case N_MATCH:
@@ -905,12 +915,11 @@ int decode_name(name_context *ctx, char *name) {
 		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
 		break;
 
-	    case N_ZERO:
-		v = ctx->last_token_int[pnum][ntok];
-		while (v--)
-		    name[len++] = '0';
-		ctx->last_token_type[cnum][ntok] = N_ZERO;
+	    case N_DIGITS0:
+		len += append_uint32_fixed(&name[len], ctx->last_token_int[pnum][ntok], ctx->last_token_str[pnum][ntok]);
+		ctx->last_token_type[cnum][ntok] = N_DIGITS0;
 		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
+		ctx->last_token_str [cnum][ntok] = ctx->last_token_str[pnum][ntok];
 		break;
 
 	    default:

@@ -87,11 +87,11 @@ typedef struct {
     int counter;
 } name_context;
 
-enum name_type {N_TYPE = 0, N_ALPHA/*, N_ALPHA_LEN*/, N_CHAR, N_ZERO,
-		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_MATCH, N_DUP, N_END};
+enum name_type {N_ERR = -1, N_TYPE = 0, N_ALPHA, N_CHAR, N_DZLEN, N_DIGITS0, N_Z1, N_DUP, N_DIFF, 
+		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_DDELTA0, N_MATCH, N_END};
 
-char *types[]={"TYPE", "ALPHA", "CHAR", "ZERO",
-	       "DIGITS", "", "", "", "DDELTA", "MATCH", "DUP", "END"};
+char *types[]={"TYPE", "ALPHA", "CHAR", "DZLEN", "DIG0", "DUP", "DIFF",
+	       "DIGITS", "", "", "", "DDELTA", "DDELTA0", "MATCH", "END"};
 
 typedef struct {
     uint8_t *buf;
@@ -103,6 +103,22 @@ static descriptor desc[MAX_DESCRIPTORS];
 //-----------------------------------------------------------------------------
 // Fast unsigned integer printing code.
 // Returns number of bytes written.
+static int append_uint32_fixed(char *cp, uint32_t i, uint8_t l) {
+    switch (l) {
+    case 9:*cp++ = i / 100000000 + '0', i %= 100000000;
+    case 8:*cp++ = i / 10000000  + '0', i %= 10000000;
+    case 7:*cp++ = i / 1000000   + '0', i %= 1000000;
+    case 6:*cp++ = i / 100000    + '0', i %= 100000;
+    case 5:*cp++ = i / 10000     + '0', i %= 10000;
+    case 4:*cp++ = i / 1000      + '0', i %= 1000;
+    case 3:*cp++ = i / 100       + '0', i %= 100;
+    case 2:*cp++ = i / 10        + '0', i %= 10;
+    case 1:*cp++ = i             + '0';
+    case 0:break;
+    }
+    return l;
+}
+
 static int append_uint32(char *cp, uint32_t i) {
     char *op = cp;
     uint32_t j;
@@ -226,6 +242,17 @@ static int encode_token_int1(name_context *ctx, int ntok,
     int id = (ntok<<4) | type;
 
     if (encode_token_type(ctx, ntok, type) < 0) return -1;
+    if (descriptor_grow(&desc[id], 1) < 0)	return -1;
+
+    desc[id].buf[desc[id].buf_l++] = val;
+
+    return 0;
+}
+
+static int encode_token_int1_(name_context *ctx, int ntok,
+			      enum name_type type, uint32_t val) {
+    int id = (ntok<<4) | type;
+
     if (descriptor_grow(&desc[id], 1) < 0)	return -1;
 
     desc[id].buf[desc[id].buf_l++] = val;
@@ -431,6 +458,16 @@ int encode_name(name_context *ctx, char *name, int len) {
     kh_value(ctx->name_s, kh) = ctx->counter++;
 
     int ntok = 0;
+    i = 0;
+
+    int l = strlen(name);
+    char *d = name;
+    if (*d == '@') d++, l--;
+    if (l == 17 && d[5] == ':' && d[11] == ':') {
+	// Ion Torrent
+	// FIXME: encode first 7 using ALPHA
+    }
+
     for (i = j = 0, k = 0; i < len; i++, j++, k++) {
 	/* Determine data type of this segment */
 	if (isalpha(name[i])) {
@@ -467,80 +504,81 @@ int encode_name(name_context *ctx, char *name, int len) {
 
 	    i = s-1;
 	} else if (name[i] == '0') {
-	    int s = i, v;
-	    while (s < len && name[s] == '0' && s-i < 255)
-		s++;
-	    v = s-i;
-
-	    if (ntok < ctx->last_ntok && ctx->last_token_type[ntok] == N_ZERO) {
-		if (ctx->last_token_int[ntok] == v) {
-		    //fprintf(stderr, "Tok %d (zero-mat, len %d)\n", N_MATCH, v);
-		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		} else {
-		    //fprintf(stderr, "Tok %d (zero, len %d / %d)\n", N_ZERO, ctx->last_token_int[ntok], v);
-		    if (encode_token_int1(ctx, ntok, N_ZERO, v) < 0) return -1;
-		}
-	    } else {
-		//fprintf(stderr, "Tok %d (new zero, len %d)\n", N_ZERO, v);
-		if (encode_token_int1(ctx, ntok, N_ZERO, v) < 0) return -1;
-	    }
-
-	    ctx->last_token_int[ntok] = v;
-	    ctx->last_token_type[ntok] = N_ZERO;
-
-	    i = s-1;
-	} else if (isdigit(name[i])) {
+	    // Digits starting with zero; encode length + value
 	    uint32_t s = i;
 	    uint32_t v = 0;
 	    int d = 0;
-	    while (s < len && isdigit(name[s]) && s-i < 9) {
+
+	    while (s < len && isdigit(name[s]) && s-i < 8) {
 		v = v*10 + name[s] - '0';
+		//putchar(name[s]);
 		s++;
 	    }
 	    
-	    // If we previously emitted a zero token at this point, then possibly
-	    // we have a fixed sized numeric field that sometimes has leading zeros
-	    // and sometimes not.  In this case we emit an N_ZERO token of 0 length
-	    // to ensure token count is constant and keep remaining tokens in frame.
-	    // Ie  :090: :111: will be CHAR ZERO DIG CHAR in all cases.
-	    //
-	    // However we only do this when the previous ZERO does indeed precede
-	    // a DIGIT as with :0: :1: :2: the :0: *is* the number and isn't actually
-	    // a leading zero.
-	    if (ntok+1 < ctx->last_ntok && ctx->last_token_type[ntok] == N_ZERO &&
-		ctx->last_token_type[ntok+1] == N_DIGITS) {
-		if (ctx->last_token_int[ntok] == 0) {
+	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
+	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
+	    if (ntok < ctx->last_ntok && ctx->last_token_type[ntok] == N_DIGITS0) {
+		d = v - ctx->last_token_int[ntok];
+		if (d == 0 && ctx->last_token_str[ntok] == s-i) {
+		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
+		    //ctx->last_token_delta[ntok]=0;
+		} else if (d < 256 && d >= 0 && ctx->last_token_str[ntok] == s-i) {
+		    //fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[ntok], v);
+		    //if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		    if (encode_token_int1(ctx, ntok, N_DDELTA0, d) < 0) return -1;
+		    //ctx->last_token_delta[ntok]=1;
 		} else {
-		    if (encode_token_int1(ctx, ntok, N_ZERO, 0) < 0) return -1;
+		    //fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[ntok], v);
+		    if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		    if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
+		    //ctx->last_token_delta[ntok]=0;
 		}
-		ctx->last_token_int[ntok] = 0;
-		ntok++;
+	    } else {
+		//fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
+		if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
+		if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
+		//ctx->last_token_delta[ntok]=0;
 	    }
 
+	    ctx->last_token_str[ntok] = s-i; // length
+	    ctx->last_token_int[ntok] = v;
+	    ctx->last_token_type[ntok] = N_DIGITS0;
 
+	    i = s-1;
+	} else if (isdigit(name[i])) {
+	    // digits starting 1-9; encode value
+	    uint32_t s = i;
+	    uint32_t v = 0;
+	    int d = 0;
+
+	    while (s < len && isdigit(name[s]) && s-i < 8) {
+		v = v*10 + name[s] - '0';
+		//putchar(name[s]);
+		s++;
+	    }
+	    
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
 	    if (ntok < ctx->last_ntok && ctx->last_token_type[ntok] == N_DIGITS) {
 		d = v - ctx->last_token_int[ntok];
-		ctx->last_token_str[ntok]++;
-		if (d == 0 /* && !ctx->last_token_delta[ntok]*/) {
+		if (d == 0) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[ntok]=0;
 		} else if (d < 256 && d >= 0) {
 		    //fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[ntok], v);
 		    if (encode_token_int1(ctx, ntok, N_DDELTA, d) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 1;
+		    //ctx->last_token_delta[ntok]=1;
 		} else {
 		    //fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[ntok], v);
 		    if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[ntok]=0;
 		}
 	    } else {
 		//fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
 		if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		//ctx->last_token_delta[ntok] = 0;
+		//ctx->last_token_delta[ntok]=0;
 	    }
 
 	    ctx->last_token_int[ntok] = v;
@@ -593,7 +631,7 @@ int decode_name(name_context *ctx, char *name) {
     *name = 0;
 
     for (ntok = 0; ntok < MAX_TOKENS; ntok++) {
-	uint32_t v;
+	uint32_t v, vl;
 	enum name_type tok;
 	tok = decode_token_type(ctx, ntok);
 	//printf("token type %s / %s, %d\n", types[tok], types[ctx->last_token_type[ntok]], ctx->last_token_int[ntok]);
@@ -623,26 +661,37 @@ int decode_name(name_context *ctx, char *name) {
 	    len += len2;
 	    break;
 
-	case N_DIGITS:
+	case N_DIGITS0: // [0-9]*
+	    decode_token_int1(ctx, ntok, N_DZLEN, &vl);
+	    decode_token_int(ctx, ntok, N_DIGITS0, &v);
+	    len += append_uint32_fixed(&name[len], v, vl);
+	    ctx->last_token_type[ntok] = N_DIGITS0;
+	    ctx->last_token_int [ntok] = v;
+	    ctx->last_token_str [ntok] = vl;
+	    break;
+
+	case N_DDELTA0:
+	    decode_token_int1(ctx, ntok, N_DDELTA0, &v);
+	    v += ctx->last_token_int[ntok];
+	    len += append_uint32_fixed(&name[len], v, ctx->last_token_str[ntok]);
+	    ctx->last_token_type[ntok] = N_DIGITS0;
+	    ctx->last_token_int [ntok] = v;
+	    ctx->last_token_str [ntok] = ctx->last_token_str[ntok];
+	    break;
+
+	case N_DIGITS: // [1-9][0-9]*
 	    decode_token_int(ctx, ntok, N_DIGITS, &v);
 	    len += append_uint32(&name[len], v);
 	    ctx->last_token_type[ntok] = N_DIGITS;
-	    ctx->last_token_int[ntok] = v;
+	    ctx->last_token_int [ntok] = v;
 	    break;
 
 	case N_DDELTA:
 	    decode_token_int1(ctx, ntok, N_DDELTA, &v);
 	    v += ctx->last_token_int[ntok];
 	    len += append_uint32(&name[len], v);
-	    ctx->last_token_int[ntok] = v;
-	    break;
-
-	case N_ZERO:
-	    decode_token_int1(ctx, ntok, N_ZERO, &v);
-	    ctx->last_token_type[ntok] = N_ZERO;
-	    ctx->last_token_int[ntok] = v;
-	    while (v--)
-		name[len++] = '0';
+	    ctx->last_token_type[ntok] = N_DIGITS;
+	    ctx->last_token_int [ntok] = v;
 	    break;
 
 	case N_MATCH:
@@ -663,10 +712,8 @@ int decode_name(name_context *ctx, char *name) {
 		len += append_uint32(&name[len], ctx->last_token_int[ntok]);
 		break;
 
-	    case N_ZERO:
-		v = ctx->last_token_int[ntok];
-		while (v--)
-		    name[len++] = '0';
+	    case N_DIGITS0:
+		len += append_uint32_fixed(&name[len], ctx->last_token_int[ntok], ctx->last_token_str[ntok]);
 		break;
 
 	    default:

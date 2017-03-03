@@ -6,6 +6,8 @@ rle=../comp/rle2
 
 mkdir $out 2>/dev/null
 
+#no_recurse=1
+
 # FIXME: make rx4 do r0 and r1 and pick whichever is best.
 comp() {
     f=$1
