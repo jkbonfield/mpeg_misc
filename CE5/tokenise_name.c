@@ -312,11 +312,15 @@ static int decode_token_int7(name_context *ctx, int ntok,
     return 0;
 }
 
+// Variable sized integers encoded 7 bits at a time.
 //#define encode_token_int encode_token_int7
 //#define decode_token_int decode_token_int7
 
-#define encode_token_int encode_token_int4
-#define decode_token_int decode_token_int4
+// 4 separate descriptors for each 8-bit element of a 32-bit int.
+// (This isn't proposed, but it's a fast way to test alternative entropy
+// encoders.)
+//#define encode_token_int encode_token_int4
+//#define decode_token_int decode_token_int4
 
 
 

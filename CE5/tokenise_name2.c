@@ -321,8 +321,8 @@ static int decode_token_int7(name_context *ctx, int ntok,
 //#define encode_token_int encode_token_int7
 //#define decode_token_int decode_token_int7
 
-#define encode_token_int encode_token_int4
-#define decode_token_int decode_token_int4
+//#define encode_token_int encode_token_int4
+//#define decode_token_int decode_token_int4
 
 
 
@@ -637,6 +637,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 		} else {
 		    //fprintf(stderr, "Tok %d (alpha, %.*s / %.*s)\n", N_ALPHA,
 		    //	    s-i, &ctx->last_name[pnum][ctx->last_token_str[pnum][ntok]], s-i, &name[i]);
+		    // same token/length, but mismatches
 		    if (encode_token_alpha(ctx, ntok, &name[i], s-i) < 0) return -1;
 		}
 	    } else {

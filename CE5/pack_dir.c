@@ -29,8 +29,11 @@ void output(char *dir, struct dirent *ent, size_t p_len) {
     else if (strcmp(fmt_s, "r1" ) == 0) fmt=2;
     else if (strcmp(fmt_s, "r1R") == 0) fmt=3;
     else if (strcmp(fmt_s, "cat") == 0) fmt=4;
+    else if (strcmp(fmt_s, "rle") == 0) fmt=5;
+    else if (strcmp(fmt_s, "ix4") == 0) fmt=6;
+    else if (strcmp(fmt_s, "r0x4")== 0) fmt=7;
     else {
-	fprintf(stderr, "Unrecognised format\n");
+	fprintf(stderr, "Unrecognised format: %s\n", fmt_s);
 	exit(1);
     }
 	     

@@ -34,6 +34,9 @@ int main(int argc, char **argv) {
 	case 2: fmt = "r1";  break;
 	case 3: fmt = "r1R"; break;
 	case 4: fmt = "cat"; break;
+	case 5: fmt = "rle"; break;
+	case 6: fmt = "ix4"; break;
+	case 7: fmt = "r0x4";break;
 	default:
 	    fprintf(stderr, "Unrecognised format code: %d\n", c);
 	    exit(1);
