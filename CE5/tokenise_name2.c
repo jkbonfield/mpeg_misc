@@ -50,6 +50,12 @@ cmix          194565  // took 6897.19 seconds!
 //
 // - Multiple INT sizes per token type.  So instead of DIGITS, have
 //   DIGITS1 to DIGITS4 for differing sizes of integer value.
+//
+// - Explore DIGITS as digits + fixed length.
+//   This leading zeros fall out naturally and we correlate length of zeros
+//   with length of numbers. Eg 00123 vs 12345 - both 5 digits, so ZERO(2)
+//   + DIGITS(123) and ZERO(0) + DIGITS(12345) just becomes
+//   DIGITS(5,123) and DIGITS(5,12345) with 5 now as a constant.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -515,7 +521,7 @@ void dump_trie(trie_t *t, int depth) {
     }
 }
 
-int search_trie(char *data, size_t len, int n, int *exact) {
+int search_trie(char *data, size_t len, int n, int *exact, int *is_iontorrent) {
     int nlines = 0;
     size_t i, j = -1;
     trie_t *t;
@@ -528,12 +534,15 @@ int search_trie(char *data, size_t len, int n, int *exact) {
     int l   = *data == '@' ? len-1  : len;
     if (l > 70 && d[0] == 'm' && d[7] == '_' && d[14] == '_' && d[61] == '/') {
 	prefix_len = 60; // PacBio
+	*is_iontorrent = 0;
     } else if (l == 17 && d[5] == ':' && d[11] == ':') {
 	prefix_len = 7;  // IonTorrent
+	*is_iontorrent = 1;
     } else {
 	// Anything else we give up on the trie method, but we still want to search
 	// for exact matches;
 	prefix_len = INT_MAX;
+	*is_iontorrent = 0;
     }
     //prefix_len = INT_MAX;
 
@@ -588,11 +597,11 @@ int search_trie(char *data, size_t len, int n, int *exact) {
  *        -1 on failure.
  */
 int encode_name(name_context *ctx, char *name, int len) {
-    int i, j, k;
+    int i, is_iontorrent;
 
     int exact;
     int cnum = ctx->counter++;
-    int pnum = search_trie(name, len, cnum, &exact);
+    int pnum = search_trie(name, len, cnum, &exact, &is_iontorrent);
     if (pnum < 0) pnum = cnum ? cnum-1 : 0;
 //    printf("%d: pnum=%d (%d), exact=%d\n%s\n%s\n",
 //	   ctx->counter, pnum, cnum-pnum, exact, ctx->last_name[pnum], name);
@@ -608,11 +617,29 @@ int encode_name(name_context *ctx, char *name, int len) {
 	memcpy(ctx->last_token_str [cnum], ctx->last_token_str [pnum], MAX_TOKENS * sizeof(int));
 	return 0;
     }
-    
+
     encode_token_diff(ctx, cnum-pnum);
 
     int ntok = 1;
-    for (i = j = 0, k = 0; i < len; i++, j++, k++) {
+    i = 0;
+#define IT_LEN 8
+    if (is_iontorrent) {
+	if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
+	    if (ctx->last_token_int[pnum][ntok] == IT_LEN && memcmp(name, ctx->last_name[pnum], IT_LEN) == 0) {
+		encode_token_match(ctx, ntok);
+	    } else {
+		encode_token_alpha(ctx, ntok, name, IT_LEN);
+	    }
+	} else {
+	    encode_token_alpha(ctx, ntok, name, IT_LEN);
+	}
+	ctx->last_token_int[cnum][ntok] = IT_LEN;
+	ctx->last_token_str[cnum][ntok] = 0;
+	ctx->last_token_type[cnum][ntok++] = N_ALPHA;
+	i = IT_LEN;
+    }
+
+    for (; i < len; i++) {
 	/* Determine data type of this segment */
 	if (isalpha(name[i])) {
 	    int s = i+1;
@@ -719,23 +746,23 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
 		d = v - ctx->last_token_int[pnum][ntok];
 		ctx->last_token_str[pnum][ntok]++;
-		if (d == 0 /* && !ctx->last_token_delta[ntok]*/) {
+		if (d == 0 /* && !ctx->last_token_delta[pnum][ntok]*/) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[pnum][ntok]=0;
 		} else if (d < 256 && d >= 0) {
 		    //fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[pnum][ntok], v);
 		    if (encode_token_int1(ctx, ntok, N_DDELTA, d) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 1;
+		    //ctx->last_token_delta[pnum][ntok]=1;
 		} else {
 		    //fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[pnum][ntok], v);
 		    if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		    //ctx->last_token_delta[ntok] = 0;
+		    //ctx->last_token_delta[pnum][ntok]=0;
 		}
 	    } else {
 		//fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
 		if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		//ctx->last_token_delta[ntok] = 0;
+		//ctx->last_token_delta[pnum][ntok]=0;
 	    }
 
 	    ctx->last_token_int[cnum][ntok] = v;
