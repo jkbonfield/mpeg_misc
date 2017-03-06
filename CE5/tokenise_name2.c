@@ -10,14 +10,6 @@
 //   C style strings (nul terminated),
 //   Or split descriptors: length descriptor and string contents descriptor.
 //
-// - Varous integer encoding methods are available.
-//   Fixed 32-bit ints (this example code).
-//   Variable sized encoding (eg zig-zag method).
-//   4 discrete channels per byte in the int (fqzcomp did this).
-//
-// - Check this works with variable number of tokens per line.
-//   Specifically using the previous token type as context will break.
-//
 // - Is this one descriptor or many descriptors?
 //   A) Lots of different models but feeding one bit-buffer emitted to
 //      by the entropy encoder => one descriptor (fqzcomp).
@@ -31,15 +23,6 @@
 // - Consider token synchronisation (eg on matching chr symbols?) incase of
 //   variable number.  Eg consider foo:0999, foo:1000, foo:1001 (the leading
 //   zero adds an extra token).
-//
-// - Multiple INT sizes per token type.  So instead of DIGITS, have
-//   DIGITS1 to DIGITS4 for differing sizes of integer value.
-//
-// - Explore DIGITS as digits + fixed length.
-//   This leading zeros fall out naturally and we correlate length of zeros
-//   with length of numbers. Eg 00123 vs 12345 - both 5 digits, so ZERO(2)
-//   + DIGITS(123) and ZERO(0) + DIGITS(12345) just becomes
-//   DIGITS(5,123) and DIGITS(5,12345) with 5 now as a constant.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +56,8 @@ enum name_type {N_ERR = -1, N_TYPE = 0, N_ALPHA, N_CHAR, N_DZLEN, N_DIGITS0, N_Z
 char *types[]={"TYPE", "ALPHA", "CHAR", "DZLEN", "DIG0", "DUP", "DIFF",
 	       "DIGITS", "", "", "", "DDELTA", "DDELTA0", "MATCH", "END"};
 
+typedef struct trie trie_t;
+
 typedef struct {
     char *last_name[MAX_NAMES];
 
@@ -86,6 +71,9 @@ typedef struct {
     khash_t(s2i) *name_s;
     khash_t(i2s) *name_i;
     int counter;
+
+    // Trie used in encoder only
+    trie_t *t_head;
 } name_context;
 
 
@@ -434,7 +422,7 @@ typedef struct trie {
     int n; // Nth line
 } trie_t;
 
-static trie_t *t_head = NULL;
+//static trie_t *t_head = NULL;
 
 void free_trie(trie_t *t) {
     int j;
@@ -445,17 +433,17 @@ void free_trie(trie_t *t) {
     free(t);
 }
 
-int build_trie(char *data, size_t len, int n) {
+int build_trie(name_context *ctx, char *data, size_t len, int n) {
     int nlines = 0;
     size_t i;
     trie_t *t;
 
-    if (!t_head)
-	t_head = calloc(1, sizeof(*t_head));
+    if (!ctx->t_head)
+	ctx->t_head = calloc(1, sizeof(*ctx->t_head));
 
     // Build our trie, also counting input lines
     for (nlines = i = 0; i < len; i++, nlines++) {
-	t = t_head;
+	t = ctx->t_head;
 	t->count++;
 	while (i < len && data[i] > '\n') {
 	    unsigned char c = data[i++];
@@ -531,7 +519,7 @@ void dump_trie(trie_t *t, int depth) {
     }
 }
 
-int search_trie(char *data, size_t len, int n, int *exact, int *is_iontorrent) {
+int search_trie(name_context *ctx, char *data, size_t len, int n, int *exact, int *is_iontorrent) {
     int nlines = 0;
     size_t i, j = -1;
     trie_t *t;
@@ -556,12 +544,12 @@ int search_trie(char *data, size_t len, int n, int *exact, int *is_iontorrent) {
     }
     //prefix_len = INT_MAX;
 
-    if (!t_head)
-	t_head = calloc(1, sizeof(*t_head));
+    if (!ctx->t_head)
+	ctx->t_head = calloc(1, sizeof(*ctx->t_head));
 
     // Find an item in the trie
     for (nlines = i = 0; i < len; i++, nlines++) {
-	t = t_head;
+	t = ctx->t_head;
 	while (i < len && data[i] > '\n') {
 	    unsigned char c = data[i++];
 	    if (c & 0x80)
@@ -611,7 +599,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 
     int exact;
     int cnum = ctx->counter++;
-    int pnum = search_trie(name, len, cnum, &exact, &is_iontorrent);
+    int pnum = search_trie(ctx, name, len, cnum, &exact, &is_iontorrent);
     if (pnum < 0) pnum = cnum ? cnum-1 : 0;
 //    printf("%d: pnum=%d (%d), exact=%d\n%s\n%s\n",
 //	   ctx->counter, pnum, cnum-pnum, exact, ctx->last_name[pnum], name);
@@ -687,7 +675,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    ctx->last_token_type[cnum][ntok] = N_ALPHA;
 
 	    i = s-1;
-	} else if (name[i] == '0') {
+	} else if (name[i] == '0') digits0: {
 	    // Digits starting with zero; encode length + value
 	    uint32_t s = i;
 	    uint32_t v = 0;
@@ -698,7 +686,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 		//putchar(name[s]);
 		s++;
 	    }
-	    
+
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
 	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS0) {
@@ -741,6 +729,14 @@ int encode_name(name_context *ctx, char *name, int len) {
 		//putchar(name[s]);
 		s++;
 	    }
+
+	    // If the last token was DIGITS0 and we are the same length, then encode
+	    // using that method instead as it seems likely the entire column is fixed
+	    // width, sometimes with leading zeros.
+	    if (ntok < ctx->last_ntok[pnum] &&
+		ctx->last_token_type[pnum][ntok] == N_DIGITS0 &&
+		ctx->last_token_str[pnum][ntok] == s-i)
+		goto digits0;
 	    
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
@@ -944,7 +940,6 @@ int decode_name(name_context *ctx, char *name) {
     return -1;
 }
 
-static name_context ctx;
 // Large enough for whole file for now.
 #define BLK_SIZE 10*1024*1024
 static char blk[BLK_SIZE];
@@ -954,6 +949,7 @@ static int decode(int argc, char **argv) {
     char *prefix = "stdin";
     char *line;
     int i;
+    name_context *ctx;
 
     if (argc > 1)
 	prefix = argv[1];
@@ -982,15 +978,21 @@ static int decode(int argc, char **argv) {
     }
 
     int ret;
-    //name_context ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.name_i = kh_init(i2s);
+    ctx = calloc(1, sizeof(*ctx));
+    ctx->name_i = kh_init(i2s);
 
     line = blk;
-    while ((ret = decode_name(&ctx, line)) > 0) {
+    while ((ret = decode_name(ctx, line)) > 0) {
 	puts(line);
 	line += ret+1;
     }
+
+    kh_destroy(i2s, ctx->name_i);
+    free(ctx);
+
+    for (i = 0; i < MAX_DESCRIPTORS; i++)
+	if (desc[i].buf)
+	    free(desc[i].buf);
 
     if (ret < 0)
 	return -1;
@@ -1002,6 +1004,7 @@ static int encode(int argc, char **argv) {
     FILE *fp;
     char *prefix = "stdin";
     int len, i, j;
+    name_context *ctx;
 
     if (argc > 1) {
 	fp = fopen(argv[1], "r");
@@ -1015,8 +1018,8 @@ static int encode(int argc, char **argv) {
     }
 
     // FIXME: loop here
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.name_s = kh_init(s2i);
+    ctx = calloc(1, sizeof(*ctx));
+    ctx->name_s = kh_init(s2i);
 
     len = fread(blk, 1, BLK_SIZE, fp);
 
@@ -1029,7 +1032,7 @@ static int encode(int argc, char **argv) {
 	    break;
 
 	//blk[i] = '\0';
-	build_trie(&blk[j], i-j, ctr++);
+	build_trie(ctx, &blk[j], i-j, ctr++);
     }
 
     // Encode name
@@ -1040,7 +1043,7 @@ static int encode(int argc, char **argv) {
 	    break;
 
 	blk[i] = '\0';
-	if (encode_name(&ctx, &blk[j], i-j) < 0)
+	if (encode_name(ctx, &blk[j], i-j) < 0)
 	    return 1;
     }
 
@@ -1071,14 +1074,14 @@ static int encode(int argc, char **argv) {
 	    perror(fn);
 	    return 1;
 	}
+
+	free(desc[i].buf);
     }
 
-//    // purge hash table
-//    khiter_t k;
-//    for (k = kh_begin(ctx.name_s); k != kh_end(ctx.name_s); ++k)
-//	if (kh_exist(ctx.name_s, k))
-//	    free((char*)kh_key(ctx.name_s, k));
-    
+    kh_destroy(s2i, ctx->name_s);
+    free_trie(ctx->t_head);
+    free(ctx);
+
     return 0;
 }
 
@@ -1090,55 +1093,3 @@ int main(int argc, char **argv) {
 	return encode(argc, argv);
 }
 
-
-/*
-Example encoding with debug:
-
-@ seq3d[mpeg/CE5]; ./a.out _names4 2>&1 | head -46
-NAME: @SRR608881.1 FCD0F0WABXX:7:1101:1439:2199/1
-Tok 2 (new chr, @)
-Tok 1 (new alpha, SRR)
-Tok 4 (new dig, 608881)
-Tok 2 (new chr, .)
-Tok 4 (new dig, 1)
-Tok 2 (new chr,  )
-Tok 1 (new alpha, FCD)
-Tok 3 (new zero, len 1)
-Tok 1 (new alpha, F)
-Tok 3 (new zero, len 1)
-Tok 1 (new alpha, WABXX)
-Tok 2 (new chr, :)
-Tok 4 (new dig, 7)
-Tok 2 (new chr, :)
-Tok 4 (new dig, 1101)
-Tok 2 (new chr, :)
-Tok 4 (new dig, 1439)
-Tok 2 (new chr, :)
-Tok 4 (new dig, 2199)
-Tok 2 (new chr, /)
-Tok 4 (new dig, 1)
-Tok 13 (end)
-NAME: @SRR608881.2 FCD0F0WABXX:7:1101:1458:2211/1
-Tok 12 (chr-mat, @)
-Tok 12 (alpha-mat, SRR)
-Tok 12 (dig-mat, 608881)
-Tok 12 (chr-mat, .)
-Tok 8 (dig-delta, 1 / 2)
-Tok 12 (chr-mat,  )
-Tok 12 (alpha-mat, FCD)
-Tok 12 (zero-mat, len 1)
-Tok 12 (alpha-mat, F)
-Tok 12 (zero-mat, len 1)
-Tok 12 (alpha-mat, WABXX)
-Tok 12 (chr-mat, :)
-Tok 12 (dig-mat, 7)
-Tok 12 (chr-mat, :)
-Tok 12 (dig-mat, 1101)
-Tok 12 (chr-mat, :)
-Tok 8 (dig-delta, 1439 / 1458)
-Tok 12 (chr-mat, :)
-Tok 8 (dig-delta, 2199 / 2211)
-Tok 12 (chr-mat, /)
-Tok 12 (dig-mat, 1)
-Tok 13 (end)
-*/
