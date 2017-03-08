@@ -942,7 +942,7 @@ int decode_name(name_context *ctx, char *name) {
 
 // Large enough for whole file for now.
 #define BLK_SIZE 10*1024*1024
-static char blk[BLK_SIZE];
+static char blk[BLK_SIZE*2]; // temporary fix for decoder, which needs more space
 
 static int decode(int argc, char **argv) {
     FILE *fp;
@@ -1018,69 +1018,89 @@ static int encode(int argc, char **argv) {
     }
 
     // FIXME: loop here
-    ctx = calloc(1, sizeof(*ctx));
-    ctx->name_s = kh_init(s2i);
+    int blk_offset = 0;
+    int blk_num = 0;
+    for (;;) {
+	int last_start = 0;
 
-    len = fread(blk, 1, BLK_SIZE, fp);
+	memset(&desc[0], 0, MAX_DESCRIPTORS * sizeof(desc[0]));
 
-    // Construct trie
-    int ctr = 0;
-    for (i = j = 0; i < len; j=++i) {
-	while (i < len && blk[i] != '\n')
-	    i++;
-	if (blk[i] != '\n')
+	ctx = calloc(1, sizeof(*ctx));
+	ctx->name_s = kh_init(s2i);
+
+	len = fread(blk+blk_offset, 1, BLK_SIZE-blk_offset, fp);
+	if (len <= 0)
 	    break;
 
-	//blk[i] = '\0';
-	build_trie(ctx, &blk[j], i-j, ctr++);
-    }
+	// Construct trie
+	int ctr = 0;
+	len += blk_offset;
+	for (i = j = 0; i < len; j=++i) {
+	    while (i < len && blk[i] != '\n')
+		i++;
+	    if (blk[i] != '\n')
+		break;
 
-    // Encode name
-    for (i = j = 0; i < len; j=++i) {
-	while (i < len && blk[i] != '\n')
-	    i++;
-	if (blk[i] != '\n')
-	    break;
+	    //blk[i] = '\0';
+	    last_start = i+1;
+	    build_trie(ctx, &blk[j], i-j, ctr++);
+	}
 
-	blk[i] = '\0';
-	if (encode_name(ctx, &blk[j], i-j) < 0)
-	    return 1;
+	fprintf(stderr, "Processed %d of %d in block\n", last_start, len);
+
+	// Encode name
+	for (i = j = 0; i < len; j=++i) {
+	    while (i < len && blk[i] != '\n')
+		i++;
+	    if (blk[i] != '\n')
+		break;
+
+	    blk[i] = '\0';
+	    if (encode_name(ctx, &blk[j], i-j) < 0)
+		return 1;
+	}
+
+	//dump_trie(t_head, 0);
+
+	// Write out descriptors
+	for (i = 0; i < MAX_DESCRIPTORS; i++) {
+	    if (!desc[i].buf_l) continue;
+
+	    //printf("Des %d/%d: size %d\n", i>>4, i&15, (int)desc[i].buf_l);
+	    char fn[1024]; // fixme
+	    sprintf(fn, "%s.blk_%06d.%d_%d", prefix, blk_num, i>>4, i&15);
+	    FILE *fp = fopen(fn, "w");
+	    if (!fp) {
+		perror(fn);
+		return 1;
+	    }
+	    if (fwrite(desc[i].buf, 1, desc[i].buf_l, fp) != desc[i].buf_l) {
+		perror(fn);
+		return 1;
+	    }
+	    if (fclose(fp) < 0) {
+		perror(fn);
+		return 1;
+	    }
+
+	    free(desc[i].buf);
+	}
+
+	kh_destroy(s2i, ctx->name_s);
+	free_trie(ctx->t_head);
+	free(ctx);
+
+	if (len > last_start) {
+	    memmove(blk, &blk[last_start], len - last_start);
+	    blk_offset = len - last_start;
+	}
+	blk_num++;
     }
 
     if (fclose(fp) < 0) {
 	perror("closing file");
 	return 1;
     }
-
-    //dump_trie(t_head, 0);
-
-    // Write out descriptors
-    for (i = 0; i < MAX_DESCRIPTORS; i++) {
-	if (!desc[i].buf_l) continue;
-
-	//printf("Des %d/%d: size %d\n", i>>4, i&15, (int)desc[i].buf_l);
-	char fn[1024]; // fixme
-	sprintf(fn, "%s.%d_%d", prefix, i>>4, i&15);
-	fp = fopen(fn, "w");
-	if (!fp) {
-	    perror(fn);
-	    return 1;
-	}
-	if (fwrite(desc[i].buf, 1, desc[i].buf_l, fp) != desc[i].buf_l) {
-	    perror(fn);
-	    return 1;
-	}
-	if (fclose(fp) < 0) {
-	    perror(fn);
-	    return 1;
-	}
-
-	free(desc[i].buf);
-    }
-
-    kh_destroy(s2i, ctx->name_s);
-    free_trie(ctx->t_head);
-    free(ctx);
 
     return 0;
 }
