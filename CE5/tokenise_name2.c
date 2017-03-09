@@ -23,6 +23,17 @@
 // - Consider token synchronisation (eg on matching chr symbols?) incase of
 //   variable number.  Eg consider foo:0999, foo:1000, foo:1001 (the leading
 //   zero adds an extra token).
+//
+// - Optimisation of tokens.  Eg:
+//     HS25_09827:2:2102:11274:80442#49
+//     HS25_09827:2:2109:12941:31311#49
+//
+//   We'll have tokens for HS 25 _ 09827 : 2 : that are entirely <MATCH>
+//   after the initial token.  These 7 tokens could be one ALPHA instead
+//   of 7 distinct tokens, with 1 MATCH instead of 7.  This is both a speed
+//   improvement for decoding as well as a space saving (fewer descriptors
+//   and associated overhead).
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1046,7 +1057,7 @@ static int encode(int argc, char **argv) {
 	    build_trie(ctx, &blk[j], i-j, ctr++);
 	}
 
-	fprintf(stderr, "Processed %d of %d in block\n", last_start, len);
+	//fprintf(stderr, "Processed %d of %d in block\n", last_start, len);
 
 	// Encode name
 	for (i = j = 0; i < len; j=++i) {
