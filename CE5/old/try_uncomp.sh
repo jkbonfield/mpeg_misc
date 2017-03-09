@@ -8,6 +8,12 @@ rle=../comp/rle2
 
 for i in $in/*
 do
+   ../comp/codec -d < $i > $(echo $i | sed "s:.*/\(.*\)\.cat$:$out/\1:")
+done
+exit
+
+for i in $in/*
+do
   case $i in
       *.cat) cat $i > $(echo $i | sed "s:.*/\(.*\)\.cat$:$out/\1:");;
       *.rle) $rle  -d < $i > $(echo $i | sed "s:.*/\(.*\)\.rle$:$out/\1:");;

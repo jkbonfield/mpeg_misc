@@ -68,7 +68,9 @@ comp() {
 
 for f in $in.[0-9]*
 do
-    comp $f
+    #comp $f
+    base=$(echo $f | sed 's:.*/::')
+    ../comp/codec < $f > $out/$base.cat
 done
 
 expr `/bin/ls -1 $out/*|wc -l` \* 2 + `cat $out/* | wc -c`

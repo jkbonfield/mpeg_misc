@@ -3,23 +3,28 @@
 in=$1
 
 tok=./tokenise_name2
+codec=../comp/codec
 
+# tokenise
 rm -rf $in.*
 $tok $in >/dev/null
-for blk in $in.blk_??????.0_0
+
+# Pack
+for blk in $in.blk_??????.000_00
 do
-    b=`echo $blk | sed 's/\.0_0$//'`
-    ./try_comp.sh $b $b.comp > /dev/null
-    ./pack_dir $b.comp $b > $b.comp.pack
+    b=`echo $blk | sed 's/\.000_00$//'`
+    $codec $b* > $b.comp
 done
-cat $in.blk_??????.comp.pack | wc -c
-(for blk in $in.blk_??????.comp.pack
+cat $in.blk_??????.comp | wc -c
+
+# Unpack
+(for blk in $in.blk_??????.comp
 do
-    b=`echo $blk | sed 's/\.comp.pack//'`
-    ./unpack_dir $b.unpack $b < $b.comp.pack
-    ./try_uncomp.sh $b.unpack $b.uncomp 2>/dev/null
-    $tok -d $b.uncomp/$b
+    b=`echo $blk | sed 's/\.comp$//'`
+    $codec -d $in.tmp < $b.comp
+    $tok -d $in.tmp
 done) > $in.new
+
 cmp $in $in.new
 
 

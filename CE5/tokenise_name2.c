@@ -55,7 +55,7 @@ KHASH_MAP_INIT_STR(s2i, int)
 KHASH_MAP_INIT_INT(i2s, char *)
 
 // FIXME
-#define MAX_TOKENS 64
+#define MAX_TOKENS 128
 #define MAX_DESCRIPTORS (MAX_TOKENS<<4)
 
 // Number of names per block
@@ -969,7 +969,7 @@ static int decode(int argc, char **argv) {
     for (i = 0; i < MAX_DESCRIPTORS; i++) {
 	struct stat sb;
 	char fn[1024]; // fixme
-	sprintf(fn, "%s.%d_%d", prefix, i>>4, i&15);
+	sprintf(fn, "%s.%03d_%02d", prefix, i>>4, i&15);
 	if (stat(fn, &sb) < 0)
 	    continue;
 
@@ -1079,7 +1079,7 @@ static int encode(int argc, char **argv) {
 
 	    //printf("Des %d/%d: size %d\n", i>>4, i&15, (int)desc[i].buf_l);
 	    char fn[1024]; // fixme
-	    sprintf(fn, "%s.blk_%06d.%d_%d", prefix, blk_num, i>>4, i&15);
+	    sprintf(fn, "%s.blk_%06d.%03d_%02d", prefix, blk_num, i>>4, i&15);
 	    FILE *fp = fopen(fn, "w");
 	    if (!fp) {
 		perror(fn);

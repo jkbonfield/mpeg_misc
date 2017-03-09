@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
+#include <fcntl.h>
 
 #include "rANS_static4x16.h"
 
@@ -311,16 +312,21 @@ int x4_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
     }
 
     *out_len = j;
-    return 0;
+    return i-in;
 }
 
 //-----------------------------------------------------------------------------
 #define BS 1024*1024
-static unsigned char *load(uint64_t *lenp) {
+static unsigned char *load(char *fn, uint64_t *lenp) {
     unsigned char *data = NULL;
     uint64_t dsize = 0;
     uint64_t dcurr = 0;
     signed int len;
+    int fd = fn ? open(fn, O_RDONLY) : 0;
+    if (fd < 0) {
+	perror(fn);
+	return NULL;
+    }
 
     do {
 	if (dsize - dcurr < BS) {
@@ -328,13 +334,17 @@ static unsigned char *load(uint64_t *lenp) {
 	    data = realloc(data, dsize);
 	}
 
-	len = read(0, data + dcurr, BS);
+	len = read(fd, data + dcurr, BS);
 	if (len > 0)
 	    dcurr += len;
     } while (len > 0);
 
+    if (fn)
+	close(fd);
+
     if (len == -1) {
 	perror("read");
+	return NULL;
     }
 
     *lenp = dcurr;
@@ -483,29 +493,84 @@ int main(int argc, char **argv) {
     uint8_t *in, *out;
     uint64_t in_len, out_len;
 
-    in = load(&in_len);
-
     if (argc > 1 && strcmp(argv[1], "-d") == 0) {
-	out_len = uncompressed_size(in, in_len);
-	out = malloc(out_len);
-	assert(out);
+	// Unpack a serialised list of compressed blocks to separate filenames.
+	in = load(NULL, &in_len);
+	
+	char *prefix = argc > 2 ? argv[2] : "_uncomp";
 
-	if (uncompress(in, in_len, out, &out_len) < 0)
-	    abort();
+	uint8_t *in2 = in;
+	int tnum = -1;
+	while (in_len) {
+	    uint8_t ttype = *in2++;
+	    uint64_t clen;
+
+	    // fixme: realloc this
+	    out_len = uncompressed_size(in2, in_len);
+	    out = malloc(out_len);
+	    assert(out);
+
+	    if ((clen = uncompress(in2, in_len, out, &out_len)) < 0)
+		abort();
+
+	    if (ttype == 0)
+		tnum++;
+	    char fn[1024];
+	    sprintf(fn, "%s.%03d_%02d", prefix, tnum, ttype);
+	    int fd = open(fn, O_WRONLY|O_TRUNC|O_CREAT, 0666);
+	    if (fd < 0) {
+		perror(fn);
+		abort();
+	    }
+
+	    if (out_len != write(fd, out, out_len))
+		abort();
+
+	    close(fd);
+
+	    free(out);
+
+	    in2 += clen;
+	    in_len -= clen+1;
+	}
+
+	free(in);
     } else {
-	out_len = 1.5 * rans_compress_bound_4x16(in_len, 1); // guesswork
-	out = malloc(out_len);
-	assert(out);
+	// Encode all filenames and stream packed data to stdout
+	int i, last_tnum = -1;
+	for (i = 1; i < argc; i++) {
+	    // parse filename
+	    size_t l = strlen(argv[i]);
+	    int tnum, ttype;
+	    if (l <= 7 || sscanf(argv[i]+l-7, ".%03d_%02d", &tnum, &ttype) != 2) {
+		fprintf(stderr, "Filename must be prefix.%%03d_%%02d syntax\n");
+		abort();
+	    }
 
-	if (compress(in, in_len, out, &out_len, 0) < 0)
-	    abort();
+	    if (ttype == 0) {
+		assert(tnum == last_tnum+1);
+		last_tnum = tnum;
+	    }
+	    
+	    in = load(argv[i], &in_len);
+
+	    out_len = 1.5 * rans_compress_bound_4x16(in_len, 1); // guesswork
+	    out = malloc(out_len);
+	    assert(out);
+
+	    uint8_t ttype8 = ttype;
+	    write(1, &ttype8, 1);
+
+	    if (compress(in, in_len, out, &out_len, 0) < 0)
+		abort();
+
+	    if (out_len != write(1, out, out_len))
+		abort();
+
+	    free(in);
+	    free(out);
+	}
     }
-
-    if (out_len != write(1, out, out_len))
-	abort();
-
-    free(in);
-    free(out);
 
     return 0;
 }
