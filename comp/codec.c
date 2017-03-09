@@ -496,6 +496,23 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "-d") == 0) {
 	// Unpack a serialised list of compressed blocks to separate filenames.
 	in = load(NULL, &in_len);
+
+	if (*in == 255) {
+	    // single file mode
+	    out_len = uncompressed_size(in+1, in_len-1);
+	    out = malloc(out_len);
+	    assert(out);
+
+	    if (uncompress(in+1, in_len-1, out, &out_len) < 0)
+		abort();
+
+	    if (out_len != write(1, out, out_len))
+		abort();
+
+	    free(out);
+	    free(in);
+	    return 0;
+	}
 	
 	char *prefix = argc > 2 ? argv[2] : "_uncomp";
 
@@ -548,6 +565,9 @@ int main(int argc, char **argv) {
 
 	    if (compress(in, in_len, out, &out_len, 0) < 0)
 		abort();
+
+	    uint8_t single = 255; // marker for single file format.
+	    write(1, &single, 1);
 
 	    if (out_len != write(1, out, out_len))
 		abort();
