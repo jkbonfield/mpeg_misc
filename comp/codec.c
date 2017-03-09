@@ -88,11 +88,11 @@ int64_t cat_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len
 //-----------------------------------------------------------------------------
 // Run length encoding.
 #ifndef GUARD
-#  define GUARD 0
+#  define GUARD 233
 #endif
 
 #ifndef RUN_LEN
-#  define RUN_LEN 3
+#  define RUN_LEN 4
 #endif
 
 int rle_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
@@ -109,7 +109,7 @@ int rle_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
 	    run_len++;
 	} else {
 	    if (++run_len >= RUN_LEN) {
-		k -= run_len * (1 + (last==0));
+		k -= run_len * (1 + (last==GUARD));
 		out[k++] = GUARD;
 		out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
 		if (run_len) out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
@@ -132,7 +132,7 @@ int rle_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
 
     // Trailing run
     if (++run_len >= RUN_LEN) {
-	k -= run_len * (1 + (last==0));
+	k -= run_len * (1 + (last==GUARD));
 	out[k++] = GUARD;
 	out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
 	if (run_len) out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
@@ -160,7 +160,7 @@ int64_t rle_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len
 	if (in[i] == GUARD) {
 	    if (in[++i] == 0) {
 		assert(j+1 <= ulen);
-	        out[j++] = 0;
+	        out[j++] = GUARD;
 	    } else {
 		uint32_t run_len = 0;
 		unsigned char c, s = 0;
@@ -538,6 +538,25 @@ int main(int argc, char **argv) {
     } else {
 	// Encode all filenames and stream packed data to stdout
 	int i, last_tnum = -1;
+	if (argc == 1) {
+	    // stdin, just for a quick single file test
+	    in = load(NULL, &in_len);
+
+	    out_len = 1.5 * rans_compress_bound_4x16(in_len, 1); // guesswork
+	    out = malloc(out_len);
+	    assert(out);
+
+	    if (compress(in, in_len, out, &out_len, 0) < 0)
+		abort();
+
+	    if (out_len != write(1, out, out_len))
+		abort();
+
+	    free(in);
+	    free(out);
+	    return 0;
+	}
+
 	for (i = 1; i < argc; i++) {
 	    // parse filename
 	    size_t l = strlen(argv[i]);

@@ -23,7 +23,7 @@ unsigned char *encode(unsigned char *data, uint64_t len, uint64_t *out_len) {
 	    run_len++;
 	} else {
 	    if (++run_len >= RUN_LEN) {
-		k -= run_len * (1 + (last==0));
+		k -= run_len * (1 + (last==GUARD));
 		out[k++] = GUARD;
 		out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
 		if (run_len) out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
@@ -46,7 +46,7 @@ unsigned char *encode(unsigned char *data, uint64_t len, uint64_t *out_len) {
 
     // Trailing run
     if (++run_len >= RUN_LEN) {
-	k -= run_len * (1 + (last==0));
+	k -= run_len * (1 + (last==GUARD));
 	out[k++] = GUARD;
 	out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
 	if (run_len) out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
@@ -78,7 +78,7 @@ unsigned char *decode(unsigned char *in, uint64_t len, uint64_t *out_len) {
 	if (in[i] == GUARD) {
 	    if (in[++i] == 0) {
 		out = grow(out, &o_len, j, 1);
-	        out[j++] = 0;
+	        out[j++] = GUARD;
 	    } else {
 		uint32_t run_len = 0;
 		unsigned char c, s = 0;

@@ -15,7 +15,9 @@ do
     b=`echo $blk | sed 's/\.000_00$//'`
     $codec $b* > $b.comp
 done
-cat $in.blk_??????.comp | wc -c
+sz=`cat $in.blk_??????.comp | wc -c`
+n=`ls -1 $in.blk_??????.comp | wc -l`
+echo "$sz in $n blocks"
 
 # Unpack
 (for blk in $in.blk_??????.comp
@@ -26,6 +28,12 @@ do
 done) > $in.new
 
 cmp $in $in.new
+
+rm $in.blk_??????.[0-9]*
+rm $in.tmp.*
+rm $in.new
+
+
 
 
 
