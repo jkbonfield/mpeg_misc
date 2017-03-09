@@ -45,7 +45,7 @@ unsigned char *encode(unsigned char *data, uint64_t len, uint64_t *out_len) {
     }
 
     // Trailing run
-    if (run_len >= RUN_LEN) {
+    if (++run_len >= RUN_LEN) {
 	k -= run_len * (1 + (last==0));
 	out[k++] = GUARD;
 	out[k++] = (run_len & 0x7f) + (run_len>=128 ?128 : 0), run_len>>=7;
