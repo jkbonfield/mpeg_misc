@@ -50,10 +50,6 @@
 #include <errno.h>
 #include <time.h>
 
-#include "khash.h"
-KHASH_MAP_INIT_STR(s2i, int)
-KHASH_MAP_INIT_INT(i2s, char *)
-
 // FIXME
 #define MAX_TOKENS 64
 #define MAX_DESCRIPTORS (MAX_TOKENS<<4)
@@ -79,8 +75,6 @@ typedef struct {
     int last_token_delta[MAX_NAMES][MAX_TOKENS]; // boolean
 
     // For finding entire line dups
-    khash_t(s2i) *name_s;
-    khash_t(i2s) *name_i;
     int counter;
 
     // Trie used in encoder only
@@ -970,8 +964,10 @@ static int decode(int argc, char **argv) {
 	struct stat sb;
 	char fn[1024]; // fixme
 	sprintf(fn, "%s.%03d_%02d", prefix, i>>4, i&15);
-	if (stat(fn, &sb) < 0)
+	if (stat(fn, &sb) < 0) {
+	    if (i&15 == 0) break;
 	    continue;
+	}
 
 	if (!(fp = fopen(fn, "r"))) {
 	    perror(fn);
@@ -990,7 +986,6 @@ static int decode(int argc, char **argv) {
 
     int ret;
     ctx = calloc(1, sizeof(*ctx));
-    ctx->name_i = kh_init(i2s);
 
     line = blk;
     while ((ret = decode_name(ctx, line)) > 0) {
@@ -998,7 +993,6 @@ static int decode(int argc, char **argv) {
 	line += ret+1;
     }
 
-    kh_destroy(i2s, ctx->name_i);
     free(ctx);
 
     for (i = 0; i < MAX_DESCRIPTORS; i++)
@@ -1037,7 +1031,6 @@ static int encode(int argc, char **argv) {
 	memset(&desc[0], 0, MAX_DESCRIPTORS * sizeof(desc[0]));
 
 	ctx = calloc(1, sizeof(*ctx));
-	ctx->name_s = kh_init(s2i);
 
 	len = fread(blk+blk_offset, 1, BLK_SIZE-blk_offset, fp);
 	if (len <= 0)
@@ -1097,7 +1090,6 @@ static int encode(int argc, char **argv) {
 	    free(desc[i].buf);
 	}
 
-	kh_destroy(s2i, ctx->name_s);
 	free_trie(ctx->t_head);
 	free(ctx);
 
