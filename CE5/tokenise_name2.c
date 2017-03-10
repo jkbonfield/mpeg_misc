@@ -55,11 +55,11 @@ KHASH_MAP_INIT_STR(s2i, int)
 KHASH_MAP_INIT_INT(i2s, char *)
 
 // FIXME
-#define MAX_TOKENS 128
+#define MAX_TOKENS 64
 #define MAX_DESCRIPTORS (MAX_TOKENS<<4)
 
 // Number of names per block
-#define MAX_NAMES 100000
+#define MAX_NAMES 1000000
 
 enum name_type {N_ERR = -1, N_TYPE = 0, N_ALPHA, N_CHAR, N_DZLEN, N_DIGITS0, N_Z1, N_DUP, N_DIFF, 
 		N_DIGITS, N_D1, N_D2, N_D3, N_DDELTA, N_DDELTA0, N_MATCH, N_END};
@@ -633,7 +633,7 @@ int encode_name(name_context *ctx, char *name, int len) {
     i = 0;
 #define IT_LEN 7
     if (is_iontorrent) {
-	if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
+	if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
 	    if (ctx->last_token_int[pnum][ntok] == IT_LEN && memcmp(name, ctx->last_name[pnum], IT_LEN) == 0) {
 		encode_token_match(ctx, ntok);
 	    } else {
@@ -663,7 +663,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    // Single byte strings are better encoded as chars.
 	    if (s-i == 1) goto n_char;
 
-	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
+	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
 		if (s-i == ctx->last_token_int[pnum][ntok] &&
 		    memcmp(&name[i], 
 			   &ctx->last_name[pnum][ctx->last_token_str[pnum][ntok]],
@@ -700,7 +700,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
-	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS0) {
+	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS0) {
 		d = v - ctx->last_token_int[pnum][ntok];
 		if (d == 0 && ctx->last_token_str[pnum][ntok] == s-i) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
@@ -744,14 +744,14 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    // If the last token was DIGITS0 and we are the same length, then encode
 	    // using that method instead as it seems likely the entire column is fixed
 	    // width, sometimes with leading zeros.
-	    if (ntok < ctx->last_ntok[pnum] &&
+	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] &&
 		ctx->last_token_type[pnum][ntok] == N_DIGITS0 &&
 		ctx->last_token_str[pnum][ntok] == s-i)
 		goto digits0;
 	    
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
-	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
+	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
 		d = v - ctx->last_token_int[pnum][ntok];
 		if (d == 0) {
 		    //fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
@@ -779,7 +779,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 	} else {
 	n_char:
 	    //if (!isalpha(name[i])) putchar(name[i]);
-	    if (ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_CHAR) {
+	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_CHAR) {
 		if (name[i] == ctx->last_token_int[pnum][ntok]) {
 		    //fprintf(stderr, "Tok %d (chr-mat, %c)\n", N_MATCH, name[i]);
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
@@ -1057,7 +1057,7 @@ static int encode(int argc, char **argv) {
 	    build_trie(ctx, &blk[j], i-j, ctr++);
 	}
 
-	//fprintf(stderr, "Processed %d of %d in block\n", last_start, len);
+	//fprintf(stderr, "Processed %d of %d in block, line %d\n", last_start, len, ctr);
 
 	// Encode name
 	for (i = j = 0; i < len; j=++i) {
@@ -1101,10 +1101,9 @@ static int encode(int argc, char **argv) {
 	free_trie(ctx->t_head);
 	free(ctx);
 
-	if (len > last_start) {
+	if (len > last_start)
 	    memmove(blk, &blk[last_start], len - last_start);
-	    blk_offset = len - last_start;
-	}
+	blk_offset = len - last_start;
 	blk_num++;
     }
 
