@@ -610,7 +610,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 //	   ctx->counter, pnum, cnum-pnum, exact, ctx->last_name[pnum], name);
 
     // Return DUP or DIFF switch, plus the distance.
-    if (exact) {
+    if (exact && len == strlen(ctx->last_name[pnum])) {
 	encode_token_dup(ctx, cnum-pnum);
 	ctx->last_name[cnum] = name;
 	ctx->last_ntok[cnum] = ctx->last_ntok[pnum];
