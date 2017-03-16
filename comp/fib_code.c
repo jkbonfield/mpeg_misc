@@ -21,15 +21,16 @@ int fib_code_sort(const void *vp1, const void *vp2) {
 
 uint8_t *encode(uint8_t *data, int64_t len, int64_t *out_len) {
     // calc lengths
-    int fib[20], a, b, n;
+    int a, b, n;
     int lhist[256][20] = {0}, run = 0;
     int F[256] = {0}, nsym;
     int64_t i, j;
     uint8_t last = -1;
     uint8_t *out = malloc(len);
 
-    for (a = 1, b = 1, n = 0; n < 20; n++)
-	fib[n] = a, a = b, b += fib[n];
+    int fib[20] = {1,1,2,3,5,8,13,21,34,55,89,144,233,377,610,987,1597,2584,4181,6765};
+//    for (a = 1, b = 1, n = 0; n < 20; n++)
+//	fib[n] = a, a = b, b += fib[n];
 
     // Aggregate code lengths
     for (i = 0; i < len; i++) {
@@ -39,12 +40,11 @@ uint8_t *encode(uint8_t *data, int64_t len, int64_t *out_len) {
 	} else {
 	    //fprintf(stderr, "run=%d:", run);
 	    while (run >= 2) {
-		n = 1;
+		n = 2;
 		while (n < 20 && run >= fib[n])
 		    n++;
 		run -= fib[n-1];
-		//fprintf(stderr, " %d", fib[n-1]);
-		lhist[last][n-1]++;
+		lhist[last][n-1]+=fib[n-1]+40; // favour small codes over long ones for O(1)
 	    }
 	    //fprintf(stderr, "\n");
 	    run = 1;
@@ -75,21 +75,22 @@ uint8_t *encode(uint8_t *data, int64_t len, int64_t *out_len) {
 	for (n = 2; n < 20; n++) {
 	    if (!lhist[i][n])
 		continue;
-	    fc[code].count = lhist[i][n]*fib[n];
+	    //fc[code].count = lhist[i][n]*fib[n];
+	    fc[code].count = lhist[i][n];
 	    fc[code].fib = n;
 	    fc[code].c = i;
 	    code++;
+	    lhist[i][n] = 0;
 	}
     }
     qsort(fc, code, sizeof(*fc), fib_code_sort);
-    //for (i = 0; i < code; i++) fprintf(stderr, "TOP: %d,%d = %d\n", fc[i].c, fc[i].fib, fc[i].count);
-    memset(lhist, 0, 256*20 * sizeof(lhist[0][0]));
+
     //fprintf(stderr, "nsym=%d\n", nsym);
     for (i = 0; i < code && i < 128; i++) {
-	if (fc[i].count < 1.5*nsym * fib[fc[i].fib]) // cost of larger O1 freq table vs saving
+	if (fc[i].count < 1.5*nsym) // cost of larger O1 freq table vs saving
 	    break;
 	lhist[fc[i].c][fc[i].fib] = 128 + i;
-	//fprintf(stderr, "code %d %d = %d\n", fc[i].c, fc[i].fib, i-1);
+	//fprintf(stderr, "code %d %d = %d\n", fc[i].c, fc[i].fib, fc[i].count, i);
     }
 
     // Replace by code lengths
@@ -136,9 +137,8 @@ uint8_t *decode(uint8_t *data, int64_t len, int64_t *out_len) {
     uint8_t *out = malloc(len);
     *out_len = len;
 
-    int fib[20], a, b, n;
-    for (a = 1, b = 1, n = 0; n < 20; n++)
-	fib[n] = a, a = b, b += fib[n];
+    int fib[20] = {1,1,2,3,5,8,13,21,34,55,89,144,233,377,610,987,1597,2584,4181,6765};
+    int a, b, n;
 
     fib_code fc[256];
 
