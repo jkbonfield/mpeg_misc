@@ -85,18 +85,19 @@ uint8_t *encode(uint8_t *data, int64_t len, int64_t *out_len) {
     }
     qsort(fc, code, sizeof(*fc), fib_code_sort);
 
-    //fprintf(stderr, "nsym=%d\n", nsym);
+    //fprintf(stderr, "nsym=%d, ncodes=%d\n", nsym, code);
     for (i = 0; i < code && i < 128; i++) {
 	if (fc[i].count < 1.5*nsym) // cost of larger O1 freq table vs saving
 	    break;
 	lhist[fc[i].c][fc[i].fib] = 128 + i;
 	//fprintf(stderr, "code %d %d = %d\n", fc[i].c, fc[i].fib, fc[i].count, i);
     }
+    code = i; // pruned code count
 
     // Replace by code lengths
     j = 0;
-    out[j++] = code > 128 ? 128 : code;
-    for (i = 0; i < code && i < 128; i++) {
+    out[j++] = code; // number of codes
+    for (i = 0; i < code; i++) {
 	out[j++] = fc[i].c;
 	out[j++] = fc[i].fib;
     }
