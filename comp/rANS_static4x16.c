@@ -1,3 +1,7 @@
+// This enables 1,2 and 4-bit packing per byte in the order-1 case (todo: order 0)
+// This is usually both a speed increase and a reduction in size.
+#define PACK
+
 /*-------------------------------------------------------------------------- */
 /* rans_byte.h from https://github.com/rygorous/ryg_rans */
 
@@ -710,9 +714,10 @@ static int decode_freq_d(uint8_t *cp, int *F0, int *F, RansDecSymbol *syms, unsi
 }
 
 unsigned int rans_compress_bound_4x16(unsigned int size, int order) {
-    return order == 0
+    return (order == 0
 	? 1.05*size + 257*3 + 4
-	: 1.05*size + 257*257*3 + 4;
+	: 1.05*size + 257*257*3 + 4) +
+	1; // +1 for packed data
 }
 
 unsigned char *rans_compress_O0_4x16(unsigned char *in, unsigned int in_size,
@@ -968,12 +973,209 @@ static void hist1_4(unsigned char *in, unsigned int in_size,
     }
 }
 
+static uint8_t *pack(uint8_t *data, int64_t len, int64_t *out_len) {
+    int p[256] = {0}, n;
+    int64_t i, j;
+    uint8_t *out = malloc(len+1);
+    if (!out)
+	return NULL;
+
+    // count syms
+    for (i = 0; i < len; i++)
+	p[data[i]]=1;
+    
+    for (i = n = 0; i < 256; i++) {
+	if (p[i]) {
+	    p[i] = n++; // p[i] is now the code number
+	    out[n] = i;
+	}
+    }
+    j = n+1;
+    out[j++] = 0;
+
+    //fprintf(stderr, "n=%d\n", n);
+    // 1 value per byte
+    if (n > 16 || len < j + len/2) {
+	out[0] = 1;
+	memcpy(out+1, data, len);
+	*out_len = len+1;
+	return out;
+    }
+
+    // Encode original length
+    int64_t len_copy = len;
+    do {
+	out[j++] = (len_copy & 0x7f) | ((len_copy >= 0x80) << 7);
+	len_copy >>= 7;
+    } while (len_copy);
+
+
+    // 2 values per byte
+    if (n > 4) {
+	out[0] = 2;
+	for (i = 0; i < (len & ~1); i+=2)
+	    out[j++] = (p[data[i]]<<4) | (p[data[i+1]]<<0);
+	switch (len-i) {
+	case 1: out[j++] = p[data[i]]<<4;
+	}
+	*out_len = j;
+	return out;
+    }
+
+    // 4 values per byte
+    if (n > 2) {
+	out[0] = 4;
+	for (i = 0; i < (len & ~3); i+=4)
+	    out[j++] = (p[data[i]]<<6) | (p[data[i+1]]<<4) | (p[data[i+2]]<<2) | (p[data[i+3]]<<0);
+	out[j] = 0;
+	int s = len-i;
+	switch (s) {
+	case 3: out[j] = (out[j]<<2) | p[data[i++]];  // -ABC want ABC-
+	case 2: out[j] = (out[j]<<2) | p[data[i++]];  // --AB want AB--
+	case 1: out[j] = (out[j]<<2) | p[data[i++]];  // ---A wan  A---
+	        out[j++] <<= (4-s)*2;
+	}
+	*out_len = j;
+	return out;
+    }
+
+    // 8 values per byte
+    if (n > 1) {
+	out[0] = 8;
+	for (i = 0; i < (len & ~7); i+=8)
+	    out[j++] = (p[data[i+0]]<<7) | (p[data[i+1]]<<6) | (p[data[i+2]]<<5) | (p[data[i+3]]<<4)
+		     | (p[data[i+4]]<<3) | (p[data[i+5]]<<2) | (p[data[i+6]]<<1) | (p[data[i+7]]<<0);
+	out[j] = 0;
+	int s = len-i;
+	switch (s) {
+	case 7: out[j] = (out[j]<<1) | p[data[i++]];
+	case 6: out[j] = (out[j]<<1) | p[data[i++]];
+	case 5: out[j] = (out[j]<<1) | p[data[i++]];
+	case 4: out[j] = (out[j]<<1) | p[data[i++]];
+	case 3: out[j] = (out[j]<<1) | p[data[i++]];
+	case 2: out[j] = (out[j]<<1) | p[data[i++]];
+	case 1: out[j] = (out[j]<<1) | p[data[i++]];
+	        out[j++] <<= 8-s;
+	}
+	*out_len = j;
+	return out;
+    }
+
+    // infinite values as only 1 type present.
+    out[0] = 0;
+    *out_len = j;
+    return out;
+}
+
+static uint8_t *unpack(uint8_t *data, int64_t len, int64_t *out_len_p) {
+    int p[16];
+    uint8_t *out, c = 0;
+    int64_t i, j, out_len;
+
+    if (data[0] == 1) {
+	// raw data
+	if (!(out = malloc(len-1))) return NULL;
+	memcpy(out, data+1, len-1);
+	*out_len_p = len-1;
+	return out;
+    }
+
+    // Decode translation table
+    j = 1;
+    do {
+	p[c++] = data[j++];
+    } while (data[j] != 0);
+    j++;
+
+    // Decode original length
+    out_len = 0;
+    int shift = 0;
+    do {
+	c = data[j++];
+	out_len |= (c & 0x7f) << shift;
+	shift += 7;
+    } while (c & 0x80);
+
+    //fprintf(stderr, "orig len = %d\n", (int)out_len);
+
+    if (!(out = malloc(out_len+7))) return NULL;
+
+    switch(data[0]) {
+    case 8:
+	for (i = 0; i < out_len; i+=8) {
+	    c = data[j++];
+	    out[i+0] = p[(c>>7)&1];
+	    out[i+1] = p[(c>>6)&1];
+	    out[i+2] = p[(c>>5)&1];
+	    out[i+3] = p[(c>>4)&1];
+	    out[i+4] = p[(c>>3)&1];
+	    out[i+5] = p[(c>>2)&1];
+	    out[i+6] = p[(c>>1)&1];
+	    out[i+7] = p[(c>>0)&1];
+	}
+	break;
+
+    case 4:
+	for (i = 0; i < out_len; i+=4) {
+	    c = data[j++];
+	    out[i+0] = p[(c>>6)&3];
+	    out[i+1] = p[(c>>4)&3];
+	    out[i+2] = p[(c>>2)&3];
+	    out[i+3] = p[(c>>0)&3];
+	}
+//	{
+//	    uint32_t *out4 = out, olen4 = out_len/4;
+//	    data += j;
+//	    for (j = 0; j < olen4; j++) {
+//		c = data[j];
+//		out4[j] = (p[c>>6]<<0) | (p[(c>>4)&3]<<8) | (p[(c>>2)&3]<<16) | (p[c&3]<<24);
+//	    }
+//	}
+	break;
+
+    case 2:
+	for (i = 0; i < out_len; i+=2) {
+	    c = data[j++];
+	    out[i+0] = p[(c>>4)&15];
+	    out[i+1] = p[(c>>0)&15];
+	}
+	break;
+
+    case 0:
+	memset(out, p[0], out_len);
+	break;
+
+    default:
+	free(out);
+	return NULL;
+    }
+
+    *out_len_p = out_len;
+    return out;
+}
+
 unsigned char *rans_compress_O1_4x16(unsigned char *in, unsigned int in_size,
 				     unsigned char *out, unsigned int *out_size) {
     unsigned char *cp, *out_end, *op;
     unsigned int tab_size, rle_i, rle_j;
     RansEncSymbol syms[256][256];
     int bound = rans_compress_bound_4x16(in_size,1);
+
+    // pack
+#ifdef PACK
+    // FIXME: fails if size is not a multiple of 4
+    uint64_t packed_size;
+    uint32_t orig_in_size = in_size;
+    unsigned char *orig_in = in;
+    in = pack(in, in_size, &packed_size);
+    in_size = packed_size;
+
+    // Check
+    uint64_t unpacked_size;
+    unsigned char *x = unpack(in, packed_size, &unpacked_size);
+    assert(orig_in_size == unpacked_size && memcmp(orig_in, x, orig_in_size) == 0);
+    free(x);
+#endif
 
     if (!out) {
 	*out_size = bound;
@@ -1132,6 +1334,12 @@ unsigned char *rans_compress_O1_4x16(unsigned char *in, unsigned int in_size,
 
     *out_size = (out_end - ptr) + tab_size;
 
+#ifdef PACK
+    free(in);
+    // in_size here is packed size.  At worst
+    // it's +1 to original size.
+#endif
+
     cp = out;
     *cp++ = (in_size>> 0) & 0xff;
     *cp++ = (in_size>> 8) & 0xff;
@@ -1151,7 +1359,7 @@ typedef struct {
 unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_size,
 					  unsigned char *out, unsigned int *out_size) {
     /* Load in the static tables */
-    unsigned char *cp = in + 4;
+    unsigned char *cp = in + 4, *out_orig = NULL;
     int i, j = -999, x, y, out_sz, rle_i, rle_j;
     sb_t sfb[256][TOTFREQ_O1+32];
     // uint16_t for ssym sometimes works faster, but considter 8-bit if cache is tight
@@ -1160,12 +1368,19 @@ unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_siz
     //memset(D, 0, 256*sizeof(*D));
 
     out_sz = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24);
+#ifdef PACK
+    out_orig = out;
+    if (!(out = malloc(out_sz)))
+	return NULL;
+#else
     if (!out) {
-	out = malloc(out_sz);
-	*out_size = out_sz;
+	// FIXME
+	out = malloc(out_sz*4);
+	*out_size = out_sz*4;
     }
     if (!out || out_sz > *out_size)
 	return NULL;
+#endif
 
     //fprintf(stderr, "out_sz=%d\n", out_sz);
 
@@ -1286,10 +1501,29 @@ unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_siz
 	l3 = c3;
     }
     
-    *out_size = out_sz;
-
 //    for (i = 0; i < 256; i++)
 //	if (D[i].R) free(D[i].R);
+
+#ifdef PACK
+    // unpack
+    uint64_t unpacked_sz;
+    // FIXME: pass in out instead.
+    in = unpack(out, out_sz, &unpacked_sz);
+    out = out_orig;
+    if (!out) {
+	out = in;
+    } else {
+	if (unpacked_sz > *out_size) {
+	    free(in);
+	    return NULL;
+	}
+	memcpy(out, in, unpacked_sz);
+	free(in);
+    }
+    *out_size = unpacked_sz;
+#else
+    *out_size = out_sz;
+#endif
 
     return out;
 }
@@ -1427,7 +1661,7 @@ int main(int argc, char **argv) {
 	    }
 
 	    gettimeofday(&tv2, NULL);
-
+	    
 	    // Warmup
 	    for (i = 0; i < nb; i++) memset(bu[i].blk, 0, BLK_SIZE);
 
