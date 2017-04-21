@@ -755,8 +755,20 @@ unsigned char *rans_compress_O0_4x16(unsigned char *in, unsigned int in_size,
     // Normalise so T[i] == TOTFREQ
     normalise_freq(F, in_size, TOTFREQ);
 
+    // Encode input size
+    cp = out;
+//    if (0 && in_size < 32768) {
+//	*cp++ = (in_size>>8)|0x80;
+//	*cp++ = (in_size>>0) & 0xff;
+//    } else {
+//	*cp++ = (in_size>>24) & 0xff;
+//	*cp++ = (in_size>>16) & 0xff;
+//	*cp++ = (in_size>> 8) & 0xff;
+//	*cp++ = (in_size>> 0) & 0xff;
+//    }
+
     // Encode statistics.
-    cp = out+4;
+    //cp = out+4;
 
     for (x = rle = j = 0; j < 256; j++) {
 	if (F[j]) {
@@ -823,11 +835,11 @@ unsigned char *rans_compress_O0_4x16(unsigned char *in, unsigned int in_size,
     // Finalise block size and return it
     *out_size = (out_end - ptr) + tab_size;
 
-    cp = out;
-    *cp++ = (in_size>> 0) & 0xff;
-    *cp++ = (in_size>> 8) & 0xff;
-    *cp++ = (in_size>>16) & 0xff;
-    *cp++ = (in_size>>24) & 0xff;
+//    cp = out;
+//    *cp++ = (in_size>> 0) & 0xff;
+//    *cp++ = (in_size>> 8) & 0xff;
+//    *cp++ = (in_size>>16) & 0xff;
+//    *cp++ = (in_size>>24) & 0xff;
 
     memmove(out + tab_size, ptr, out_end-ptr);
 
@@ -841,13 +853,19 @@ typedef struct {
 unsigned char *rans_uncompress_O0_4x16(unsigned char *in, unsigned int in_size,
 				       unsigned char *out, unsigned int *out_size) {
     /* Load in the static tables */
-    unsigned char *cp = in + 4;
+    unsigned char *cp = in;
     int i, j, x, y, out_sz, rle;
     uint16_t sfreq[TOTFREQ+32];
     uint16_t sbase[TOTFREQ+32]; // faster to use 32-bit on clang
     uint8_t  ssym [TOTFREQ+64]; // faster to use 16-bit on clang
 
-    out_sz = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24);
+    //out_sz = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24); 
+//    out_sz = in[0] & 0x80
+//	? ((in[0]&0x7f)<<8) | in[1]
+//	: ((in[0])<<24) | ((in[1])<<16) | ((in[2])<<8) | ((in[3])<<0);
+//    assert(out_sz == *out_size);
+//    cp += in[0] & 0x80 ? 2 : 4;
+    out_sz = *out_size;
     if (!out) {
 	out = malloc(out_sz);
 	*out_size = out_sz;
@@ -1563,7 +1581,18 @@ unsigned char *rans_compress_O1_4x16(unsigned char *in, unsigned int in_size,
 	return NULL;
 
     out_end = out + bound;
-    cp = out+4;
+
+    // Encode input size
+    cp = out;
+//    if (0 && in_size < 32768) {
+//	*cp++ = (in_size>>8)|0x80;
+//	*cp++ = (in_size>>0) & 0xff;
+//    } else {
+//	*cp++ = (in_size>>24) & 0xff;
+//	*cp++ = (in_size>>16) & 0xff;
+//	*cp++ = (in_size>> 8) & 0xff;
+//	*cp++ = (in_size>> 0) & 0xff;
+//    }
 
     int F[256][256] = {{0}}, T[256+MAGIC] = {0}, i, j;
 
@@ -1712,11 +1741,11 @@ unsigned char *rans_compress_O1_4x16(unsigned char *in, unsigned int in_size,
 
     *out_size = (out_end - ptr) + tab_size;
 
-    cp = out;
-    *cp++ = (in_size>> 0) & 0xff;
-    *cp++ = (in_size>> 8) & 0xff;
-    *cp++ = (in_size>>16) & 0xff;
-    *cp++ = (in_size>>24) & 0xff;
+//    cp = out;
+//    *cp++ = (in_size>> 0) & 0xff;
+//    *cp++ = (in_size>> 8) & 0xff;
+//    *cp++ = (in_size>>24) & 0xff;
+//    *cp++ = (in_size>>16) & 0xff;
 
     memmove(out + tab_size, ptr, out_end-ptr);
 
@@ -1731,7 +1760,8 @@ typedef struct {
 unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_size,
 					  unsigned char *out, unsigned int *out_size) {
     /* Load in the static tables */
-    unsigned char *cp = in + 4, *out_orig = NULL;
+    //unsigned char *cp = in + 4, *out_orig = NULL;
+    unsigned char *cp = in, *out_orig = NULL;
     int i, j = -999, x, y, out_sz, rle_i, rle_j;
     sb_t sfb[256][TOTFREQ_O1+32];
     // uint16_t for ssym sometimes works faster, but considter 8-bit if cache is tight
@@ -1739,7 +1769,11 @@ unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_siz
     
     //memset(D, 0, 256*sizeof(*D));
 
-    out_sz = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24);
+    //out_sz = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24);
+//    out_sz = in[0] & 0x80
+//	? ((in[0]&0x7f)<<8) | in[1]
+//	: ((in[0])<<24) | ((in[1])<<16) | ((in[2])<<8) | ((in[3])<<0);
+    out_sz = *out_size;
     if (!out) {
 	out = malloc(out_sz);
 	*out_size = out_sz;
@@ -1895,6 +1929,17 @@ unsigned char *rans_compress_to_4x16(unsigned char *in,  unsigned int in_size,
     if (do_pack || do_rle) {
 	*(uint32_t *)(&out[1]) = in_size;
 	c_meta_len += 4;
+//	if (in_size < 32768) {
+//	    out[1] = in_size>>8;
+//	    out[2] = in_size;
+//	    c_meta_len += 2;
+//	} else {
+//	    out[1] = (in_size>>24) | 0x80;
+//	    out[2] = in_size>>16;
+//	    out[3] = in_size>>8;
+//	    out[4] = in_size;
+//	    c_meta_len += 4;
+//	}
     }
 
     order &= 0xf;
@@ -1982,6 +2027,12 @@ unsigned char *rans_uncompress_to_4x16(unsigned char *in,  unsigned int in_size,
     int do_rle  = order & X_RLE;
     order &= 0xf;
 
+//    if (in[0] && 0x80) {
+//	*out_size = ((in[0]&0x7f)<<24) | ((in[1])<<16) | ((in[2])<<8) | ((in[3])<<0);
+//    } else {
+//	*out_size = (in[0]<<8) | in[1];
+//    }
+
     if (!out) {
 	// FIXME: check
 	*out_size = ((in[0])<<0) | ((in[1])<<8) | ((in[2])<<16) | ((in[3])<<24);
@@ -2017,6 +2068,7 @@ unsigned char *rans_uncompress_to_4x16(unsigned char *in,  unsigned int in_size,
 
     if (do_pack || do_rle) {
 	tmp = malloc(*out_size); // FIXME: check
+
 	if (do_pack && do_rle) {
 	    tmp1 = out;
 	    tmp2 = tmp;

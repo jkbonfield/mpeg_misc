@@ -189,14 +189,22 @@ int64_t rle_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len
 //-----------------------------------------------------------------------------
 // rANS codec
 int rans_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int method) {
-    unsigned int olen = *out_len-5;
+    unsigned int olen = *out_len-10;
     *out = RANS0;
 
-    if (rans_compress_to_4x16(in, in_len, out+5, &olen, method) == NULL)
+    if (rans_compress_to_4x16(in, in_len, out+10, &olen, method) == NULL)
 	return -1;
-    *(uint32_t *)(out+1) = olen;
 
-    *out_len = olen+5;
+    int nb = i7put(out+1, in_len);
+    nb += i7put(out+1+nb, olen);
+
+    assert(nb <= 9);
+    if (nb < 9)
+	memmove(out+1+nb, out+10, olen);
+
+    //fprintf(stderr, "ENC %d %d\n", (int)in_len, (int)olen);
+
+    *out_len = 1+olen+nb;
     return 0;
 }
 
@@ -206,11 +214,17 @@ int64_t rans_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_le
     unsigned int olen = *out_len;
     assert(*in == RANS0);
 
-    if (rans_uncompress_to_4x16(in+5, in_len, out, &olen, method) == NULL)
+    uint64_t ulen, clen;
+    int nb = i7get(in+1, &ulen);
+    nb += i7get(in+1+nb, &clen);
+
+    olen = ulen;
+    if (rans_uncompress_to_4x16(in+1+nb, in_len, out, &olen, method) == NULL)
 	return -1;
 
+    //fprintf(stderr, "DEC %d %d %d %d\n", (int)in_len, (int)olen, (int)*out_len, (int)olen2);
     *out_len = olen;
-    return 5 + *(uint32_t *)(in+1);
+    return 1 + nb + clen;
 }
 
 int rans0_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
@@ -404,8 +418,8 @@ int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int 
     }
 
     int rmethods[] = {0,1,128,129,64,65,192,193}, m;
-    //for (m = 0; m < 2; m++) {
-    for (m = 0; m < 8; m++) {
+    for (m = 0; m < 2; m++) {
+	//for (m = 0; m < 8; m++) {
 	*out_len = olen;
 	if (rans_encode(in, in_len, out, out_len, rmethods[m]) < 0) return -1;
 #ifdef DEBUG
@@ -504,9 +518,6 @@ uint64_t uncompressed_size(uint8_t *in, uint64_t in_len) {
     case CAT:
     case RLE:
     case X4:
-	i7get(in+1, &ulen);
-	break;
-
     case RANS0:
     case RANS1:
     case PACK0:
@@ -514,19 +525,9 @@ uint64_t uncompressed_size(uint8_t *in, uint64_t in_len) {
     case RLE0:
     case RLE1:
     case PACK_RLE0:
-    case PACK_RLE1: {
-	uint32_t ulen32 = *(uint32_t *)(in+6);
-	ulen = ulen32;
+    case PACK_RLE1:
+	i7get(in+1, &ulen);
 	break;
-    }
-
-//    case RANS0:
-//    case RANS1: {
-//	//uint32_t ulen32 = *(uint32_t *)(in+5);
-//	uint32_t ulen32 = *(uint32_t *)(in+6);
-//	ulen = ulen32;
-//	break;
-//    }
 
     default:
 	return -1;

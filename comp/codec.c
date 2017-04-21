@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
@@ -20,7 +21,8 @@
 #include "rANS_static4x16.h"
 
 typedef enum {
-    CAT, RLE, RANS0, RANS1, X4
+    CAT, RLE, RANS0, RANS1, X4, PACK,
+    RLE0, RLE1, PACK0, PACK1,
 } codec_t;
 
 int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int no_X4);
@@ -182,6 +184,152 @@ int64_t rle_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len
     *out_len = ulen;
 
     return i; // number of compressed bytes consumed.
+}
+
+//-----------------------------------------------------------------------------
+// Bit packing
+int pack_encode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
+    uint8_t *o = out;
+    int p[256] = {0}, n;
+    int64_t i, j;
+
+    *o++ = PACK;
+    o += i7put(o, in_len);
+
+    // count syms
+    for (i = 0; i < in_len; i++)
+	p[in[i]]=1;
+    
+    for (i = n = 0; i < 256; i++) {
+	if (p[i]) {
+	    p[i] = n++; // p[i] is now the code number
+	    *o++ = i;
+	}
+    }
+    *o++ = 0;
+
+    //fprintf(stderr, "n=%d\n", n);
+    // 1 value per byte
+    if (n > 16 || in_len < o-out + in_len/2) {
+	*o++ = 1;
+	memcpy(o, in, in_len);
+	*out_len = o+in_len-out;
+	return 0;
+    }
+
+    // FIXME: partial bytes (we overrun atm)
+
+    // 2 values per byte
+    if (n > 4) {
+	*o++ = 2;
+	for (i = 0; i < in_len; i+=2)
+	    *o++ = (p[in[i]]<<4) | (p[in[i+1]]<<0);
+	*out_len = o - out;
+	return 0;
+    }
+
+    // 4 values per byte
+    if (n > 2) {
+	*o++ = 4;
+	for (i = 0; i < in_len; i+=4)
+	    *o++ = (p[in[i]]<<6) | (p[in[i+1]]<<4) | (p[in[i+2]]<<2) | (p[in[i+3]]<<0);
+	*out_len = o - out;
+	return 0;
+    }
+
+    // 8 values per byte
+    if (n > 1) {
+	*o++ = 8;
+	for (i = 0; i < in_len; i+=8)
+	    *o++ = (p[in[i+0]]<<7) | (p[in[i+1]]<<6) | (p[in[i+2]]<<5) | (p[in[i+3]]<<4)
+		 | (p[in[i+4]]<<3) | (p[in[i+5]]<<2) | (p[in[i+6]]<<1) | (p[in[i+7]]<<0);
+	*out_len = o - out;
+	return 0;
+    }
+
+    // infinite values as only 1 type present.
+    *o++ = 0;
+    *out_len = o-out;
+    return 0;
+}
+
+int64_t pack_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
+//    int p[256];
+//    uint8_t *out, c;
+//    int64_t i, j, out_len;
+//
+//    if (data[0] == 1) {
+//	// raw data
+//	if (!(out = malloc(len-1))) return NULL;
+//	memcpy(out, data+1, len-1);
+//	*out_len_p = len-1;
+//	return out;
+//    }
+//
+//    // Decode translation table
+//    j = 1;
+//    do {
+//	p[c++] = data[j++];
+//    } while (data[j] != 0);
+//    j++;
+//
+//    // Decode original length
+//    out_len = 0;
+//    int shift = 0;
+//    do {
+//	c = data[j++];
+//	out_len |= (c & 0x7f) << shift;
+//	shift += 7;
+//    } while (c & 0x80);
+//
+//    fprintf(stderr, "orig len = %d\n", (int)out_len);
+//
+//    if (!(out = malloc(out_len+7))) return NULL;
+//    
+//    switch(data[0]) {
+//    case 8:
+//	for (i = 0; i < out_len; i+=8) {
+//	    c = data[j++];
+//	    out[i+0] = p[(c>>7)&1];
+//	    out[i+1] = p[(c>>6)&1];
+//	    out[i+2] = p[(c>>5)&1];
+//	    out[i+3] = p[(c>>4)&1];
+//	    out[i+4] = p[(c>>3)&1];
+//	    out[i+5] = p[(c>>2)&1];
+//	    out[i+6] = p[(c>>1)&1];
+//	    out[i+7] = p[(c>>0)&1];
+//	}
+//	break;
+//
+//    case 4:
+//	for (i = 0; i < out_len; i+=4) {
+//	    c = data[j++];
+//	    out[i+0] = p[(c>>6)&3];
+//	    out[i+1] = p[(c>>4)&3];
+//	    out[i+2] = p[(c>>2)&3];
+//	    out[i+3] = p[(c>>0)&3];
+//	}
+//	break;
+//
+//    case 2:
+//	for (i = 0; i < out_len; i+=8) {
+//	    c = data[j++];
+//	    out[i+0] = p[(c>>4)&15];
+//	    out[i+1] = p[(c>>0)&15];
+//	}
+//	break;
+//
+//    case 0:
+//	memset(out, p[0], out_len);
+//	break;
+//
+//    default:
+//	free(out);
+//	return NULL;
+//    }
+//
+//    *out_len_p = out_len;
+//    return out;
 }
 
 //-----------------------------------------------------------------------------
@@ -356,6 +504,9 @@ int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int 
     codec_t best = CAT;
     uint64_t olen = *out_len;
 
+    uint8_t *tmp = malloc(*out_len);
+    uint64_t tmp_len;
+
     *out_len = olen;
     if (cat_encode(in, in_len, out, out_len) < 0) return -1;
 #ifdef DEBUG
@@ -398,6 +549,69 @@ int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int 
 	}
     }
 
+    if (in_len >= 4) {
+	*out_len = olen;
+	if (pack_encode(in, in_len, out, out_len) < 0) return -1;
+#ifdef DEBUG
+	fprintf(stderr, "PACK -> %ld\n", (long)*out_len);
+#endif
+	if (best_sz > *out_len) {
+	    best_sz = *out_len;
+	    best = PACK;
+	}
+    }
+
+    if (in_len < 16)
+	goto simple_only;
+
+    tmp_len = olen;
+    if (rle_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+    *out_len = olen;
+    if (rans0_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+#ifdef DEBUG
+    fprintf(stderr, "RLE0  -> %ld\n", (long)*out_len);
+#endif
+    if (best_sz > *out_len) {
+	best_sz = *out_len;
+	best = RLE0;
+    }
+
+    tmp_len = olen;
+    if (rle_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+    *out_len = olen;
+    if (rans1_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+#ifdef DEBUG
+    fprintf(stderr, "RLE1  -> %ld\n", (long)*out_len);
+#endif
+    if (best_sz > *out_len) {
+	best_sz = *out_len;
+	best = RLE1;
+    }
+
+    tmp_len = olen;
+    if (pack_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+    *out_len = olen;
+    if (rans0_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+#ifdef DEBUG
+    fprintf(stderr, "PACK0 -> %ld\n", (long)*out_len);
+#endif
+    if (best_sz > *out_len) {
+	best_sz = *out_len;
+	best = PACK0;
+    }
+
+    tmp_len = olen;
+    if (pack_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+    *out_len = olen;
+    if (rans1_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+#ifdef DEBUG
+    fprintf(stderr, "PACK1 -> %ld\n", (long)*out_len);
+#endif
+    if (best_sz > *out_len) {
+	best_sz = *out_len;
+	best = PACK1;
+    }
+
     if (!no_X4 && in_len%4 == 0 && in_len >= 32) {
 #ifdef DEBUG
 	fprintf(stderr, "\n");
@@ -412,6 +626,8 @@ int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int 
 	    best = X4;
 	}
     }
+
+ simple_only:
 
 #ifdef DEBUG
     fprintf(stderr, "Best method = %d, %ld -> %ld\n", best, (long)in_len, (long)best_sz);
@@ -434,11 +650,47 @@ int compress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len, int 
     case RANS1:
 	*out_len = olen;
 	if (rans1_encode(in, in_len, out, out_len) < 0) return -1;
-	// last method and already in this format.
+	break;
+
+    case PACK:
+	*out_len = olen;
+	if (pack_encode(in, in_len, out, out_len) < 0) return -1;
+	break;
+
+    case RLE0:
+	tmp_len = olen;
+	if (rle_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+	*out_len = olen;
+	if (rans0_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+	break;
+
+    case RLE1:
+	tmp_len = olen;
+	if (rle_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+	*out_len = olen;
+	if (rans1_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+	break;
+
+    case PACK0:
+	tmp_len = olen;
+	if (pack_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+	*out_len = olen;
+	if (rans0_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+	break;
+
+    case PACK1:
+	tmp_len = olen;
+	if (pack_encode(in, in_len, tmp, &tmp_len) < 0) return -1;
+	*out_len = olen;
+	if (rans1_encode(tmp, tmp_len, out, out_len) < 0) return -1;
+	break;
+
 
     default:
 	break;
     }
+
+    free(tmp);
 
     return 0;
 }
@@ -468,25 +720,46 @@ uint64_t uncompressed_size(uint8_t *in, uint64_t in_len) {
 }
 
 int uncompress(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
+    int r;
+#ifdef DEBUG
+    static int level = 0;
+    level++;
+#endif
+
     switch (*in) {
     case CAT:
-	return cat_decode(in, in_len, out, out_len);
+	r=cat_decode(in, in_len, out, out_len);
+	break;
 
     case RLE:
-	return rle_decode(in, in_len, out, out_len);
+	r=rle_decode(in, in_len, out, out_len);
+	break;
 
     case RANS0:
-	return rans0_decode(in, in_len, out, out_len);
+	r=rans0_decode(in, in_len, out, out_len);
+	break;
 
     case RANS1:
-	return rans1_decode(in, in_len, out, out_len);
+	r=rans1_decode(in, in_len, out, out_len);
+	break;
 
     case X4:
-	return x4_decode(in, in_len, out, out_len);
+	r=x4_decode(in, in_len, out, out_len);
+	break;
 
     default:
 	return -1;
     }
+
+#ifdef DEBUG
+    char *m[] = {"CAT", "RLE", "RANS0", "RANS1", "X4", "PACK",
+		 "RLE0", "RLE1", "PACK0", "PACK1"};
+    level--;
+    fprintf(stderr, "Decode %"PRId64" -> %"PRId64"\tmethod %s\n", 
+	    in_len, *out_len, m[*in]);
+#endif
+
+    return r;
 }
 
 int main(int argc, char **argv) {
