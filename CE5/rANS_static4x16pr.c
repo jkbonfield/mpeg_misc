@@ -1668,12 +1668,16 @@ unsigned char *rans_compress_O1_4x16(unsigned char *in, unsigned int in_size,
 
     if (cp - op > 1000 && cp - op < 100000) {
 	// try rans0 compression of header
-	unsigned int c_freq_sz;
-	unsigned char *c_freq = rans_compress_O0_4x16(op+1, cp-(op+1), NULL, &c_freq_sz);
+	unsigned int c_freq_sz, u_freq_sz = cp-(op+1);
+	unsigned char *c_freq = rans_compress_O0_4x16(op+1, u_freq_sz, NULL, &c_freq_sz);
 	if (c_freq && c_freq_sz < 65536 && c_freq_sz + 3 < cp-op) {
-	    *op++ = 1; // compressed
+	    *op++ = 1+(u_freq_sz > 65535); // compressed
 	    *op++ = c_freq_sz & 0xff;
 	    *op++ = c_freq_sz>>8;
+	    *op++ = u_freq_sz & 0xff;
+	    *op++ = (u_freq_sz>>8) & 0xff;
+	    if (u_freq_sz > 65535)
+		*op++ = (u_freq_sz>>16) & 0xff;
 	    memcpy(op, c_freq, c_freq_sz);
 	    cp = op+c_freq_sz;
 	}
@@ -1786,9 +1790,14 @@ unsigned char *rans_uncompress_O1sfb_4x16(unsigned char *in, unsigned int in_siz
     // compressed header? If so uncompress it
     unsigned char *tab_end = NULL;
     unsigned char *c_freq = NULL;
-    if (*cp++ == 1) {
-	unsigned int c_freq_sz = cp[0] | (cp[1]<<8), u_freq_sz;
+    int c_tab = *cp++;
+    if (c_tab) {
+	unsigned int c_freq_sz = cp[0] | (cp[1]<<8);
 	cp += 2;
+	unsigned int u_freq_sz = cp[0] | (cp[1]<<8);
+	cp += 2;
+	if (c_tab > 1)
+	    u_freq_sz |= (*cp++)<<16;
 	tab_end = cp + c_freq_sz;
 	c_freq = rans_uncompress_O0_4x16(cp, c_freq_sz, NULL, &u_freq_sz);
 	cp = c_freq;
