@@ -1,4 +1,4 @@
-// cc -g -O3 tokenise_name3.c codec_orig.c ../comp/rANS_static4x16b.c -lm
+// cc -I. -g -O3 tokenise_name3.c codec_orig.c rANS_static4x16pr.c pooled_alloc.c -lm
 
 // As per tokenise_name2 but has the entropy encoder built in already,
 // so we just have a single encode and decode binary.  (WIP; mainly TODO)
@@ -54,6 +54,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
+#include <pooled_alloc.h>
 
 // FIXME
 #define MAX_TOKENS 128
@@ -71,21 +72,50 @@ char *types[]={"TYPE", "ALPHA", "CHAR", "DZLEN", "DIG0", "DUP", "DIFF",
 typedef struct trie trie_t;
 
 typedef struct {
-    char *last_name[MAX_NAMES];
+    char *last_name;
+    int last_ntok;
+    enum name_type last_token_type[MAX_TOKENS];
+    int last_token_int[MAX_TOKENS];
+    int last_token_str[MAX_TOKENS];
+    //int last_token_delta[MAX_TOKENS];
+} last_context;
 
-    int last_ntok[MAX_NAMES];
-    enum name_type last_token_type[MAX_NAMES][MAX_TOKENS];
-    int last_token_int  [MAX_NAMES][MAX_TOKENS]; // decoded integer
-    int last_token_str  [MAX_NAMES][MAX_TOKENS]; // offset into name
-    int last_token_delta[MAX_NAMES][MAX_TOKENS]; // boolean
+typedef struct {
+    last_context *lc;
 
     // For finding entire line dups
     int counter;
 
     // Trie used in encoder only
     trie_t *t_head;
+    pool_alloc_t *pool;
 } name_context;
 
+name_context *create_context(int max_names) {
+    name_context *ctx = malloc(sizeof(*ctx) + max_names*sizeof(*ctx->lc));
+    if (!ctx) return NULL;
+
+    ctx->counter = 0;
+    ctx->t_head = NULL;
+
+    ctx->lc = (last_context *)(((char *)ctx) + sizeof(*ctx));
+    ctx->pool = NULL;
+
+    return ctx;
+}
+
+void free_trie(trie_t *t);
+void free_context(name_context *ctx) {
+    if (!ctx)
+	return;
+
+//    if (ctx->t_head)
+//	free_trie(ctx->t_head);
+    if (ctx->pool)
+	pool_destroy(ctx->pool);
+
+    free(ctx);
+}
 
 typedef struct {
     uint8_t *buf;
@@ -115,7 +145,7 @@ static int append_uint32_fixed(char *cp, uint32_t i, uint8_t l) {
     return l;
 }
 
-static int append_uint32(char *cp, uint32_t i) {
+static int append_uint32_var(char *cp, uint32_t i) {
     char *op = cp;
     uint32_t j;
 
@@ -430,17 +460,18 @@ static int encode_token_diff(name_context *ctx, uint32_t val) {
 typedef struct trie {
     char c;
     int count;
-    struct trie *next[128];
+    //struct trie *next[128];
+    struct trie *next, *sibling;
     int n; // Nth line
 } trie_t;
 
 //static trie_t *t_head = NULL;
 
 void free_trie(trie_t *t) {
-    int j;
-    for (j = 0; j < 128; j++) {
-	if (t->next[j])
-	    free_trie(t->next[j]);
+    trie_t *x, *n;
+    for (x = t->next; x; x = n) {
+	n = x->sibling;
+	free_trie(x);
     }
     free(t);
 }
@@ -463,12 +494,25 @@ int build_trie(name_context *ctx, char *data, size_t len, int n) {
 		//fprintf(stderr, "8-bit ASCII is unsupported\n");
 		abort();
 	    c &= 127;
-	    if (!t->next[c])  {
-		//t->next[c] = (trie_t *)pool_calloc(t_pool, sizeof(*t));
-		t->next[c] = calloc(1, sizeof(*t));
-		t->next[c]->n = n;
+
+
+	    trie_t *x = t->next, *l = NULL;
+	    while (x && x->c != c) {
+		l = x; x = x->sibling;
 	    }
-	    t = t->next[c];
+	    if (!x) {
+		if (!ctx->pool)
+		    ctx->pool = pool_create(sizeof(trie_t));
+		x = (trie_t *)pool_alloc(ctx->pool);
+		memset(x, 0, sizeof(*x));
+		if (!l)
+		    x = t->next    = x;
+		else
+		    x = l->sibling = x;
+		x->n = n;
+		x->c = c;
+	    }
+	    t = x;
 	    t->c = c;
 	    t->count++;
 	}
@@ -477,6 +521,7 @@ int build_trie(name_context *ctx, char *data, size_t len, int n) {
     return 0;
 }
 
+#if 0
 void dump_trie(trie_t *t, int depth) {
     if (depth == 0) {
 	printf("graph x_%p {\n    splines = ortho\n    ranksep=2\n", t);
@@ -498,7 +543,16 @@ void dump_trie(trie_t *t, int depth) {
 //	    *cp++ = cj;
 //	    goto patricia;
 //	}
-	    
+
+	trie_t *x;
+	for (x = t->next; x; x = x->sibling) {
+	    printf("    p_%p [label=\"%c\"];\n", x, x->c);
+	    printf("    p_%p -- p_%p [label=\"%d\", penwidth=\"%f\"];\n", tp, x, x->count, MAX((log(x->count)-3)*2,1));
+	    //if (depth <= 11)
+		dump_trie(x, depth+1);
+	}
+
+#if 0	    
 	for (j = 0; j < 128; j++) {
 	    trie_t *tn;
 
@@ -521,15 +575,15 @@ void dump_trie(trie_t *t, int depth) {
 //	    }
 	    *cp++ = 0;
 
-#define MAX(a,b) ((a)>(b)?(a):(b))
-
 	    printf("    p_%p [label=\"%s\"];\n", tn, label);
 	    printf("    p_%p -- p_%p [label=\"%d\", penwidth=\"%f\"];\n", tp, tn, tn->count, MAX((log(tn->count)-3)*2,1));
 	    if (depth <= 11)
 		dump_trie(tn, depth+1);
 	}
+#endif
     }
 }
+#endif
 
 int search_trie(name_context *ctx, char *data, size_t len, int n, int *exact, int *is_fixed, int *fixed_len) {
     int nlines = 0;
@@ -577,14 +631,14 @@ int search_trie(name_context *ctx, char *data, size_t len, int n, int *exact, in
 		//fprintf(stderr, "8-bit ASCII is unsupported\n");
 		abort();
 	    c &= 127;
-	    assert(t->next[c]);
-	    if (!t->next[c])  {
-		//t->next[c] = (trie_t *)pool_calloc(t_pool, sizeof(*t));
-		t->next[c] = calloc(1, sizeof(*t));
-		if (j == -1)
-		    j = i;
-	    }
-	    t = t->next[c];
+
+	    trie_t *x = t->next;
+	    while (x && x->c != c)
+		x = x->sibling;
+	    t = x;
+
+//	    t = t->next[c];
+
 	    from = t->n;
 	    if (i == prefix_len) p3 = t->n;
 	    //if (t->count >= .0035*ctx->t_head->count && t->n != n) p3 = t->n; // pacbio
@@ -615,27 +669,31 @@ int search_trie(name_context *ctx, char *data, size_t len, int n, int *exact, in
  * Returns 0 on success;
  *        -1 on failure.
  */
-int encode_name(name_context *ctx, char *name, int len) {
+static int encode_name(name_context *ctx, char *name, int len) {
     int i, is_fixed, fixed_len;
 
     int exact;
     int cnum = ctx->counter++;
     int pnum = search_trie(ctx, name, len, cnum, &exact, &is_fixed, &fixed_len);
     if (pnum < 0) pnum = cnum ? cnum-1 : 0;
+    //pnum = pnum & (MAX_NAMES-1);
+    //cnum = cnum & (MAX_NAMES-1);
+    //if (pnum == cnum) {pnum = cnum ? cnum-1 : 0;}
 #ifdef ENC_DEBUG
     fprintf(stderr, "%d: pnum=%d (%d), exact=%d\n%s\n%s\n",
-	    ctx->counter, pnum, cnum-pnum, exact, ctx->last_name[pnum], name);
+	    ctx->counter, pnum, cnum-pnum, exact, ctx->lc[pnum].last_name, name);
 #endif
 
     // Return DUP or DIFF switch, plus the distance.
-    if (exact && len == strlen(ctx->last_name[pnum])) {
+    if (exact && len == strlen(ctx->lc[pnum].last_name)) {
 	encode_token_dup(ctx, cnum-pnum);
-	ctx->last_name[cnum] = name;
-	ctx->last_ntok[cnum] = ctx->last_ntok[pnum];
+	ctx->lc[cnum].last_name = name;
+	ctx->lc[cnum].last_ntok = ctx->lc[pnum].last_ntok;
 	// FIXME: optimise this
-	memcpy(ctx->last_token_type[cnum], ctx->last_token_type[pnum], MAX_TOKENS * sizeof(int));
-	memcpy(ctx->last_token_int [cnum], ctx->last_token_int [pnum], MAX_TOKENS * sizeof(int));
-	memcpy(ctx->last_token_str [cnum], ctx->last_token_str [pnum], MAX_TOKENS * sizeof(int));
+	int nc = ctx->lc[cnum].last_ntok ? ctx->lc[cnum].last_ntok : MAX_TOKENS;
+	memcpy(ctx->lc[cnum].last_token_type, ctx->lc[pnum].last_token_type, nc * sizeof(int));
+	memcpy(ctx->lc[cnum].last_token_int , ctx->lc[pnum].last_token_int , nc * sizeof(int));
+	memcpy(ctx->lc[cnum].last_token_str , ctx->lc[pnum].last_token_str , nc * sizeof(int));
 	return 0;
     }
 
@@ -644,8 +702,8 @@ int encode_name(name_context *ctx, char *name, int len) {
     int ntok = 1;
     i = 0;
     if (is_fixed) {
-	if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
-	    if (ctx->last_token_int[pnum][ntok] == fixed_len && memcmp(name, ctx->last_name[pnum], fixed_len) == 0) {
+	if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok && ctx->lc[pnum].last_token_type[ntok] == N_ALPHA) {
+	    if (ctx->lc[pnum].last_token_int[ntok] == fixed_len && memcmp(name, ctx->lc[pnum].last_name, fixed_len) == 0) {
 		encode_token_match(ctx, ntok);
 	    } else {
 		encode_token_alpha(ctx, ntok, name, fixed_len);
@@ -653,9 +711,9 @@ int encode_name(name_context *ctx, char *name, int len) {
 	} else {
 	    encode_token_alpha(ctx, ntok, name, fixed_len);
 	}
-	ctx->last_token_int[cnum][ntok] = fixed_len;
-	ctx->last_token_str[cnum][ntok] = 0;
-	ctx->last_token_type[cnum][ntok++] = N_ALPHA;
+	ctx->lc[cnum].last_token_int[ntok] = fixed_len;
+	ctx->lc[cnum].last_token_str[ntok] = 0;
+	ctx->lc[cnum].last_token_type[ntok++] = N_ALPHA;
 	i = fixed_len;
     }
 
@@ -674,10 +732,10 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    // Single byte strings are better encoded as chars.
 	    if (s-i == 1) goto n_char;
 
-	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_ALPHA) {
-		if (s-i == ctx->last_token_int[pnum][ntok] &&
+	    if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok && ctx->lc[pnum].last_token_type[ntok] == N_ALPHA) {
+		if (s-i == ctx->lc[pnum].last_token_int[ntok] &&
 		    memcmp(&name[i], 
-			   &ctx->last_name[pnum][ctx->last_token_str[pnum][ntok]],
+			   &ctx->lc[pnum].last_name[ctx->lc[pnum].last_token_str[ntok]],
 			   s-i) == 0) {
 #ifdef ENC_DEBUG
 		    fprintf(stderr, "Tok %d (alpha-mat, %.*s)\n", N_MATCH, s-i, &name[i]);
@@ -686,7 +744,7 @@ int encode_name(name_context *ctx, char *name, int len) {
 		} else {
 #ifdef ENC_DEBUG
 		    fprintf(stderr, "Tok %d (alpha, %.*s / %.*s)\n", N_ALPHA,
-		    	    s-i, &ctx->last_name[pnum][ctx->last_token_str[pnum][ntok]], s-i, &name[i]);
+		    	    s-i, &ctx->lc[pnum].last_name[ctx->lc[pnum].last_token_str[ntok]], s-i, &name[i]);
 #endif
 		    // same token/length, but mismatches
 		    if (encode_token_alpha(ctx, ntok, &name[i], s-i) < 0) return -1;
@@ -698,9 +756,9 @@ int encode_name(name_context *ctx, char *name, int len) {
 		if (encode_token_alpha(ctx, ntok, &name[i], s-i) < 0) return -1;
 	    }
 
-	    ctx->last_token_int[cnum][ntok] = s-i;
-	    ctx->last_token_str[cnum][ntok] = i;
-	    ctx->last_token_type[cnum][ntok] = N_ALPHA;
+	    ctx->lc[cnum].last_token_int[ntok] = s-i;
+	    ctx->lc[cnum].last_token_str[ntok] = i;
+	    ctx->lc[cnum].last_token_type[ntok] = N_ALPHA;
 
 	    i = s-1;
 	} else if (name[i] == '0') digits0: {
@@ -717,28 +775,28 @@ int encode_name(name_context *ctx, char *name, int len) {
 
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
-	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS0) {
-		d = v - ctx->last_token_int[pnum][ntok];
-		if (d == 0 && ctx->last_token_str[pnum][ntok] == s-i) {
+	    if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok && ctx->lc[pnum].last_token_type[ntok] == N_DIGITS0) {
+		d = v - ctx->lc[pnum].last_token_int[ntok];
+		if (d == 0 && ctx->lc[pnum].last_token_str[ntok] == s-i) {
 #ifdef ENC_DEBUG
 		    fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 #endif
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=0;
-		} else if (d < 256 && d >= 0 && ctx->last_token_str[pnum][ntok] == s-i) {
+		    //ctx->lc[pnum].last_token_delta[ntok]=0;
+		} else if (d < 256 && d >= 0 && ctx->lc[pnum].last_token_str[ntok] == s-i) {
 #ifdef ENC_DEBUG
-		    fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[pnum][ntok], v);
+		    fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->lc[pnum].last_token_int[ntok], v);
 #endif
 		    //if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
 		    if (encode_token_int1(ctx, ntok, N_DDELTA0, d) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=1;
+		    //ctx->lc[pnum].last_token_delta[ntok]=1;
 		} else {
 #ifdef ENC_DEBUG
-		    fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[pnum][ntok], v);
+		    fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->lc[pnum].last_token_int[ntok], v);
 #endif
 		    if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
 		    if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=0;
+		    //ctx->lc[pnum].last_token_delta[ntok]=0;
 		}
 	    } else {
 #ifdef ENC_DEBUG
@@ -746,12 +804,12 @@ int encode_name(name_context *ctx, char *name, int len) {
 #endif
 		if (encode_token_int1_(ctx, ntok, N_DZLEN, s-i) < 0) return -1;
 		if (encode_token_int(ctx, ntok, N_DIGITS0, v) < 0) return -1;
-		//ctx->last_token_delta[pnum][ntok]=0;
+		//ctx->lc[pnum].last_token_delta[ntok]=0;
 	    }
 
-	    ctx->last_token_str[cnum][ntok] = s-i; // length
-	    ctx->last_token_int[cnum][ntok] = v;
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
+	    ctx->lc[cnum].last_token_str[ntok] = s-i; // length
+	    ctx->lc[cnum].last_token_int[ntok] = v;
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS0;
 
 	    i = s-1;
 	} else if (isdigit(name[i])) {
@@ -769,58 +827,58 @@ int encode_name(name_context *ctx, char *name, int len) {
 	    // If the last token was DIGITS0 and we are the same length, then encode
 	    // using that method instead as it seems likely the entire column is fixed
 	    // width, sometimes with leading zeros.
-	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] &&
-		ctx->last_token_type[pnum][ntok] == N_DIGITS0 &&
-		ctx->last_token_str[pnum][ntok] == s-i)
+	    if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok &&
+		ctx->lc[pnum].last_token_type[ntok] == N_DIGITS0 &&
+		ctx->lc[pnum].last_token_str[ntok] == s-i)
 		goto digits0;
 	    
 	    // TODO: optimise choice over whether to switch from DIGITS to DELTA
 	    // regularly vs all DIGITS, also MATCH vs DELTA 0.
-	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_DIGITS) {
-		d = v - ctx->last_token_int[pnum][ntok];
+	    if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok && ctx->lc[pnum].last_token_type[ntok] == N_DIGITS) {
+		d = v - ctx->lc[pnum].last_token_int[ntok];
 		if (d == 0) {
 #ifdef ENC_DEBUG
 		    fprintf(stderr, "Tok %d (dig-mat, %d)\n", N_MATCH, v);
 #endif
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=0;
+		    //ctx->lc[pnum].last_token_delta[ntok]=0;
 		} else if (d < 256 && d >= 0) {
 #ifdef ENC_DEBUG
-		    fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->last_token_int[pnum][ntok], v);
+		    fprintf(stderr, "Tok %d (dig-delta, %d / %d)\n", N_DDELTA, ctx->lc[pnum].last_token_int[ntok], v);
 #endif
 		    if (encode_token_int1(ctx, ntok, N_DDELTA, d) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=1;
+		    //ctx->lc[pnum].last_token_delta[ntok]=1;
 		} else {
 #ifdef ENC_DEBUG
-		    fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->last_token_int[pnum][ntok], v);
+		    fprintf(stderr, "Tok %d (dig, %d / %d)\n", N_DIGITS, ctx->lc[pnum].last_token_int[ntok], v);
 #endif
 		    if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		    //ctx->last_token_delta[pnum][ntok]=0;
+		    //ctx->lc[pnum].last_token_delta[ntok]=0;
 		}
 	    } else {
 #ifdef ENC_DEBUG
 		fprintf(stderr, "Tok %d (new dig, %d)\n", N_DIGITS, v);
 #endif
 		if (encode_token_int(ctx, ntok, N_DIGITS, v) < 0) return -1;
-		//ctx->last_token_delta[pnum][ntok]=0;
+		//ctx->lc[pnum].last_token_delta[ntok]=0;
 	    }
 
-	    ctx->last_token_int[cnum][ntok] = v;
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS;
+	    ctx->lc[cnum].last_token_int[ntok] = v;
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS;
 
 	    i = s-1;
 	} else {
 	n_char:
 	    //if (!isalpha(name[i])) putchar(name[i]);
-	    if (pnum < cnum && ntok < ctx->last_ntok[pnum] && ctx->last_token_type[pnum][ntok] == N_CHAR) {
-		if (name[i] == ctx->last_token_int[pnum][ntok]) {
+	    if (pnum < cnum && ntok < ctx->lc[pnum].last_ntok && ctx->lc[pnum].last_token_type[ntok] == N_CHAR) {
+		if (name[i] == ctx->lc[pnum].last_token_int[ntok]) {
 #ifdef ENC_DEBUG
 		    fprintf(stderr, "Tok %d (chr-mat, %c)\n", N_MATCH, name[i]);
 #endif
 		    if (encode_token_match(ctx, ntok) < 0) return -1;
 		} else {
 #ifdef ENC_DEBUG
-		    fprintf(stderr, "Tok %d (chr, %c / %c)\n", N_CHAR, ctx->last_token_int[pnum][ntok], name[i]);
+		    fprintf(stderr, "Tok %d (chr, %c / %c)\n", N_CHAR, ctx->lc[pnum].last_token_int[ntok], name[i]);
 #endif
 		    if (encode_token_char(ctx, ntok, name[i]) < 0) return -1;
 		}
@@ -831,8 +889,8 @@ int encode_name(name_context *ctx, char *name, int len) {
 		if (encode_token_char(ctx, ntok, name[i]) < 0) return -1;
 	    }
 
-	    ctx->last_token_int[cnum][ntok] = name[i];
-	    ctx->last_token_type[cnum][ntok] = N_CHAR;
+	    ctx->lc[cnum].last_token_int[ntok] = name[i];
+	    ctx->lc[cnum].last_token_type[ntok] = N_CHAR;
 	}
 
 	ntok++;
@@ -846,18 +904,17 @@ int encode_name(name_context *ctx, char *name, int len) {
 
     //printf("Encoded %.*s with %d tokens\n", len, name, ntok);
     
-    ctx->last_name[cnum] = name;
-    ctx->last_ntok[cnum] = ntok;
+    ctx->lc[cnum].last_name = name;
+    ctx->lc[cnum].last_ntok = ntok;
 
     return 0;
 }
-
 
 //-----------------------------------------------------------------------------
 // Name decoder
 
 // FIXME: should know the maximum name length for safety.
-int decode_name(name_context *ctx, char *name) {
+static int decode_name(name_context *ctx, char *name) {
     int t0 = decode_token_type(ctx, 0);
     uint32_t dist;
     int pnum, cnum = ctx->counter++;
@@ -871,13 +928,14 @@ int decode_name(name_context *ctx, char *name) {
     //fprintf(stderr, "t0=%d, dist=%d, pnum=%d, cnum=%d\n", t0, dist, pnum, cnum);
 
     if (t0 == N_DUP) {
-	strcpy(name, ctx->last_name[pnum]);
+	strcpy(name, ctx->lc[pnum].last_name);
 	// FIXME: optimise this
-	ctx->last_name[cnum] = name;
-	ctx->last_ntok[cnum] = ctx->last_ntok[pnum];
-	memcpy(ctx->last_token_type[cnum], ctx->last_token_type[pnum], MAX_TOKENS * sizeof(int));
-	memcpy(ctx->last_token_int [cnum], ctx->last_token_int [pnum], MAX_TOKENS * sizeof(int));
-	memcpy(ctx->last_token_str [cnum], ctx->last_token_str [pnum], MAX_TOKENS * sizeof(int));
+	ctx->lc[cnum].last_name = name;
+	ctx->lc[cnum].last_ntok = ctx->lc[pnum].last_ntok;
+	int nc = ctx->lc[cnum].last_ntok ? ctx->lc[cnum].last_ntok : MAX_TOKENS;
+	memcpy(ctx->lc[cnum].last_token_type, ctx->lc[pnum].last_token_type, nc * sizeof(int));
+	memcpy(ctx->lc[cnum].last_token_int , ctx->lc[pnum].last_token_int , nc * sizeof(int));
+	memcpy(ctx->lc[cnum].last_token_str , ctx->lc[pnum].last_token_str , nc * sizeof(int));
 
 	return strlen(name);
     }
@@ -895,16 +953,16 @@ int decode_name(name_context *ctx, char *name) {
 	case N_CHAR:
 	    decode_token_char(ctx, ntok, &name[len]);
 	    //fprintf(stderr, "Tok %d CHAR %c\n", ntok, name[len]);
-	    ctx->last_token_type[cnum][ntok] = N_CHAR;
-	    ctx->last_token_int [cnum][ntok] = name[len++];
+	    ctx->lc[cnum].last_token_type[ntok] = N_CHAR;
+	    ctx->lc[cnum].last_token_int [ntok] = name[len++];
 	    break;
 
 	case N_ALPHA:
 	    len2 = decode_token_alpha(ctx, ntok, &name[len]);
 	    //fprintf(stderr, "Tok %d ALPHA %.*s\n", ntok, len2, &name[len]);
-	    ctx->last_token_type[cnum][ntok] = N_ALPHA;
-	    ctx->last_token_str [cnum][ntok] = len;
-	    ctx->last_token_int [cnum][ntok] = len2;
+	    ctx->lc[cnum].last_token_type[ntok] = N_ALPHA;
+	    ctx->lc[cnum].last_token_str [ntok] = len;
+	    ctx->lc[cnum].last_token_int [ntok] = len2;
 	    len += len2;
 	    break;
 
@@ -913,71 +971,71 @@ int decode_name(name_context *ctx, char *name) {
 	    decode_token_int(ctx, ntok, N_DIGITS0, &v);
 	    len += append_uint32_fixed(&name[len], v, vl);
 	    //fprintf(stderr, "Tok %d DIGITS0 %0*d\n", ntok, vl, v);
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
-	    ctx->last_token_int [cnum][ntok] = v;
-	    ctx->last_token_str [cnum][ntok] = vl;
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS0;
+	    ctx->lc[cnum].last_token_int [ntok] = v;
+	    ctx->lc[cnum].last_token_str [ntok] = vl;
 	    break;
 
 	case N_DDELTA0:
 	    decode_token_int1(ctx, ntok, N_DDELTA0, &v);
-	    v += ctx->last_token_int[pnum][ntok];
-	    len += append_uint32_fixed(&name[len], v, ctx->last_token_str[pnum][ntok]);
-	    //fprintf(stderr, "Tok %d DELTA0 %0*d\n", ntok, ctx->last_token_str[pnum][ntok], v);
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS0;
-	    ctx->last_token_int [cnum][ntok] = v;
-	    ctx->last_token_str [cnum][ntok] = ctx->last_token_str[pnum][ntok];
+	    v += ctx->lc[pnum].last_token_int[ntok];
+	    len += append_uint32_fixed(&name[len], v, ctx->lc[pnum].last_token_str[ntok]);
+	    //fprintf(stderr, "Tok %d DELTA0 %0*d\n", ntok, ctx->lc[pnum].last_token_str[ntok], v);
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS0;
+	    ctx->lc[cnum].last_token_int [ntok] = v;
+	    ctx->lc[cnum].last_token_str [ntok] = ctx->lc[pnum].last_token_str[ntok];
 	    break;
 
 	case N_DIGITS: // [1-9][0-9]*
 	    decode_token_int(ctx, ntok, N_DIGITS, &v);
-	    len += append_uint32(&name[len], v);
+	    len += append_uint32_var(&name[len], v);
 	    //fprintf(stderr, "Tok %d DIGITS %d\n", ntok, v);
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS;
-	    ctx->last_token_int [cnum][ntok] = v;
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS;
+	    ctx->lc[cnum].last_token_int [ntok] = v;
 	    break;
 
 	case N_DDELTA:
 	    decode_token_int1(ctx, ntok, N_DDELTA, &v);
-	    v += ctx->last_token_int[pnum][ntok];
-	    len += append_uint32(&name[len], v);
+	    v += ctx->lc[pnum].last_token_int[ntok];
+	    len += append_uint32_var(&name[len], v);
 	    //fprintf(stderr, "Tok %d DELTA %d\n", ntok, v);
-	    ctx->last_token_type[cnum][ntok] = N_DIGITS;
-	    ctx->last_token_int [cnum][ntok] = v;
+	    ctx->lc[cnum].last_token_type[ntok] = N_DIGITS;
+	    ctx->lc[cnum].last_token_int [ntok] = v;
 	    break;
 
 	case N_MATCH:
-	    switch (ctx->last_token_type[pnum][ntok]) {
+	    switch (ctx->lc[pnum].last_token_type[ntok]) {
 	    case N_CHAR:
-		name[len++] = ctx->last_token_int[pnum][ntok];
-		//fprintf(stderr, "Tok %d MATCH CHAR %c\n", ntok, ctx->last_token_int[pnum][ntok]);
-		ctx->last_token_type[cnum][ntok] = N_CHAR;
-		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
+		name[len++] = ctx->lc[pnum].last_token_int[ntok];
+		//fprintf(stderr, "Tok %d MATCH CHAR %c\n", ntok, ctx->lc[pnum].last_token_int[ntok]);
+		ctx->lc[cnum].last_token_type[ntok] = N_CHAR;
+		ctx->lc[cnum].last_token_int [ntok] = ctx->lc[pnum].last_token_int[ntok];
 		break;
 
 	    case N_ALPHA:
 		memcpy(&name[len],
-		       &ctx->last_name[pnum][ctx->last_token_str[pnum][ntok]],
-		       ctx->last_token_int[pnum][ntok]);
-		//fprintf(stderr, "Tok %d MATCH ALPHA %.*s\n", ntok, ctx->last_token_int[pnum][ntok], &name[len]);
-		ctx->last_token_type[cnum][ntok] = N_ALPHA;
-		ctx->last_token_str [cnum][ntok] = len;
-		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
-		len += ctx->last_token_int[pnum][ntok];
+		       &ctx->lc[pnum].last_name[ctx->lc[pnum].last_token_str[ntok]],
+		       ctx->lc[pnum].last_token_int[ntok]);
+		//fprintf(stderr, "Tok %d MATCH ALPHA %.*s\n", ntok, ctx->lc[pnum].last_token_int[ntok], &name[len]);
+		ctx->lc[cnum].last_token_type[ntok] = N_ALPHA;
+		ctx->lc[cnum].last_token_str [ntok] = len;
+		ctx->lc[cnum].last_token_int [ntok] = ctx->lc[pnum].last_token_int[ntok];
+		len += ctx->lc[pnum].last_token_int[ntok];
 		break;
 
 	    case N_DIGITS:
-		len += append_uint32(&name[len], ctx->last_token_int[pnum][ntok]);
-		//fprintf(stderr, "Tok %d MATCH DIGITS %d\n", ntok, ctx->last_token_int[pnum][ntok]);
-		ctx->last_token_type[cnum][ntok] = N_DIGITS;
-		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
+		len += append_uint32_var(&name[len], ctx->lc[pnum].last_token_int[ntok]);
+		//fprintf(stderr, "Tok %d MATCH DIGITS %d\n", ntok, ctx->lc[pnum].last_token_int[ntok]);
+		ctx->lc[cnum].last_token_type[ntok] = N_DIGITS;
+		ctx->lc[cnum].last_token_int [ntok] = ctx->lc[pnum].last_token_int[ntok];
 		break;
 
 	    case N_DIGITS0:
-		len += append_uint32_fixed(&name[len], ctx->last_token_int[pnum][ntok], ctx->last_token_str[pnum][ntok]);
-		//fprintf(stderr, "Tok %d MATCH DIGITS %0*d\n", ntok, ctx->last_token_str[pnum][ntok], ctx->last_token_int[pnum][ntok]);
-		ctx->last_token_type[cnum][ntok] = N_DIGITS0;
-		ctx->last_token_int [cnum][ntok] = ctx->last_token_int[pnum][ntok];
-		ctx->last_token_str [cnum][ntok] = ctx->last_token_str[pnum][ntok];
+		len += append_uint32_fixed(&name[len], ctx->lc[pnum].last_token_int[ntok], ctx->lc[pnum].last_token_str[ntok]);
+		//fprintf(stderr, "Tok %d MATCH DIGITS %0*d\n", ntok, ctx->lc[pnum].last_token_str[ntok], ctx->lc[pnum].last_token_int[ntok]);
+		ctx->lc[cnum].last_token_type[ntok] = N_DIGITS0;
+		ctx->lc[cnum].last_token_int [ntok] = ctx->lc[pnum].last_token_int[ntok];
+		ctx->lc[cnum].last_token_str [ntok] = ctx->lc[pnum].last_token_str[ntok];
 		break;
 
 	    default:
@@ -987,9 +1045,10 @@ int decode_name(name_context *ctx, char *name) {
 
 	case N_END:
 	    name[len++] = 0;
-	    ctx->last_token_type[cnum][ntok] = N_END;
+	    ctx->lc[cnum].last_token_type[ntok] = N_END;
 	    // FIXME: avoid using memcpy, just keep pointer into buffer?
-	    ctx->last_name[cnum] = name;
+	    ctx->lc[cnum].last_name = name;
+	    ctx->lc[cnum].last_ntok = ntok;
 	    
 	    return len;
 
@@ -1003,7 +1062,7 @@ int decode_name(name_context *ctx, char *name) {
 }
 
 // Large enough for whole file for now.
-#define BLK_SIZE 10*1024*1024
+#define BLK_SIZE 1*1024*1024
 static char blk[BLK_SIZE*2]; // temporary fix for decoder, which needs more space
 
 static int decode(int argc, char **argv) {
@@ -1075,7 +1134,7 @@ static int decode(int argc, char **argv) {
 	}
 
 	int ret;
-	ctx = calloc(1, sizeof(*ctx));
+	ctx = create_context(MAX_NAMES);
 
 	line = blk;
 	while ((ret = decode_name(ctx, line)) > 0) {
@@ -1083,7 +1142,7 @@ static int decode(int argc, char **argv) {
 	    line += ret+1;
 	}
 
-	free(ctx);
+	free_context(ctx);
 
 	for (i = 0; i < MAX_DESCRIPTORS; i++) {
 	    if (desc[i].buf) {
@@ -1094,6 +1153,8 @@ static int decode(int argc, char **argv) {
 
 	if (ret < 0)
 	    return -1;
+
+	free(in);
     }
 
     return 0;
@@ -1123,7 +1184,7 @@ static int encode(int argc, char **argv) {
 
 	memset(&desc[0], 0, MAX_DESCRIPTORS * sizeof(desc[0]));
 
-	ctx = calloc(1, sizeof(*ctx));
+	ctx = create_context(MAX_NAMES);
 
 	len = fread(blk+blk_offset, 1, BLK_SIZE-blk_offset, fp);
 	if (len <= 0)
@@ -1246,8 +1307,7 @@ static int encode(int argc, char **argv) {
 	    free(desc[i].buf);
 	}
 
-	free_trie(ctx->t_head);
-	free(ctx);
+	free_context(ctx);
 
 	if (len > last_start)
 	    memmove(blk, &blk[last_start], len - last_start);

@@ -338,7 +338,10 @@ int x4_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
 	i4[j] = j*len4;
 	olen = *out_len - (o-o_orig);
 	int64_t clen = uncompress(i, in_len, o, &olen);
-	if (clen < 0) return -1;
+	if (clen < 0) {
+	    free(o_orig);
+	    return -1;
+	}
 	i += clen;
 	o += olen;
     }
@@ -351,6 +354,8 @@ int x4_decode(uint8_t *in, uint64_t in_len, uint8_t *out, uint64_t *out_len) {
 	out[j++] = o_orig[i4[2]++];
 	out[j++] = o_orig[i4[3]++];
     }
+
+    free(o_orig);
 
     *out_len = j;
     return i-in;
