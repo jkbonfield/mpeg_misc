@@ -3,7 +3,8 @@
 #define PACK
 
 /*-------------------------------------------------------------------------- */
-/* rans_byte.h from https://github.com/rygorous/ryg_rans */
+// From here to "#endif // RANS_BYTE_HEADER" below are derived from rans_byte.h
+// at https://github.com/rygorous/ryg_rans
 
 // Simple byte-aligned rANS encoder/decoder - public domain - Fabian 'ryg' Giesen 2014
 //
@@ -388,6 +389,9 @@ static inline void RansDecRenorm(RansState* r, uint8_t** pptr)
 #endif // RANS_BYTE_HEADER
 
 /*-------------------------------------------------------------------------- */
+// From here down is authored by James Bonfield, under the copyright / license
+// described in the root directory.
+
 /*
  * Example wrapper to use the rans_byte.h functions included above.
  *

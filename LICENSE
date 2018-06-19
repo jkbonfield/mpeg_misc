@@ -1,6 +1,14 @@
+Unless stated otherwise in individual source files, this software is
+under the following software license.  (Files containing other
+copyright / license statements include, but may not be limited to,
+khash.h and rANS_static*.c.)
+
+-----------------------------------------------------------------------------
+
 MIT License
 
-Copyright (c) 2017 James Bonfield
+Copyright (c) 2017 Genome Research Ltd.
+Author: James Bonfield <jkb@sanger.ac.uk>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
